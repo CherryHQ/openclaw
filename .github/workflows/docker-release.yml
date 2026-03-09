@@ -24,6 +24,7 @@ env:
 jobs:
   # Build amd64 image
   build-amd64:
+    if: github.repository == 'openclaw/openclaw'
     runs-on: blacksmith-16vcpu-ubuntu-2404
     permissions:
       packages: write
@@ -103,6 +104,7 @@ jobs:
 
   # Build arm64 image
   build-arm64:
+    if: github.repository == 'openclaw/openclaw'
     runs-on: blacksmith-16vcpu-ubuntu-2404-arm
     permissions:
       packages: write
