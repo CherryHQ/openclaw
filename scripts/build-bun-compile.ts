@@ -5,6 +5,7 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
+  readdirSync,
   realpathSync,
   rmSync,
   writeFileSync,
@@ -97,11 +98,26 @@ function findInPnpm(packageName: string, parentPackage?: string): string | null 
     }
   }
 
-  // Strategy 2: glob search in .pnpm
+  // Strategy 2: direct readdir of .pnpm (more reliable on Windows than Bun.Glob)
+  const pnpmDir = resolve("node_modules/.pnpm");
   const pnpmName = packageName.replace(/\//g, "+");
+  try {
+    for (const entry of readdirSync(pnpmDir)) {
+      if (entry.startsWith(`${pnpmName}@`)) {
+        const candidate = resolve(pnpmDir, entry, "node_modules", packageName);
+        if (existsSync(candidate)) {
+          return candidate;
+        }
+      }
+    }
+  } catch {
+    // fall through
+  }
+
+  // Strategy 3: glob search in .pnpm (fallback)
   const pattern = `**/${pnpmName}@*/node_modules/${packageName}`;
   const glob = new Bun.Glob(pattern);
-  for (const match of glob.scanSync({ cwd: resolve("node_modules/.pnpm"), absolute: true })) {
+  for (const match of glob.scanSync({ cwd: pnpmDir, absolute: true })) {
     return match;
   }
   return null;
