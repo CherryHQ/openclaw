@@ -275,20 +275,58 @@ export { getLoadablePath, load };
       // require("path/to/jiti") fails but require("path/to/jiti/lib/jiti.cjs") works.
       const jitiRequireExpr = `require(require("node:path").join(require("node:path").dirname(process.execPath), "node_modules", "jiti", "lib", "jiti.cjs"))`;
 
+      // --- plugin-sdk: embed pre-bundled JS files into binary via $bunfs ---
+      // Scan the pre-built plugin-sdk directory and generate import statements.
+      // Patch resolvePluginSdkAliasFile to check $bunfs paths first.
+      const sdkFiles: string[] = [];
+      const sdkImportLines: string[] = [];
+      let sdkRootExpr = "null";
+      if (existsSync(sdkTempDir)) {
+        for (const f of readdirSync(sdkTempDir)) {
+          if (f.endsWith(".js")) {
+            const fullPath = resolve(sdkTempDir, f);
+            sdkFiles.push(fullPath);
+            sdkImportLines.push(
+              `import __sdk${sdkFiles.length - 1} from ${JSON.stringify(fullPath)} with { type: "file" };`,
+            );
+          }
+        }
+        // Derive $bunfs plugin-sdk root from the first file
+        if (sdkFiles.length > 0) {
+          sdkRootExpr = `__sdk0.replace(/[\\\\/][^\\\\/]+$/, "")`;
+        }
+        console.log(
+          `[bun-compile] Plugin: plugin-sdk → embedding ${sdkFiles.length} files into binary`,
+        );
+      }
+
       build.onLoad({ filter: /plugins[/\\]loader\.ts$/ }, (args) => {
         const original = readFileSync(args.path, "utf-8");
-        const patched = original
-          .replace(
-            /import\s*\{\s*createJiti\s*\}\s*from\s*["']jiti["'];?/,
-            `const { createJiti } = ${jitiRequireExpr};`,
-          )
-          // In compiled binary, import.meta.url is /$bunfs/root/entry.js which
-          // breaks resolvePluginSdkAliasFile's directory traversal. Replace with
-          // process.execPath so it finds src/plugin-sdk/ next to the binary.
-          .replace(
-            /const\s+modulePath\s*=\s*params\.modulePath\s*\?\?\s*fileURLToPath\(import\.meta\.url\);/,
-            `const modulePath = params.modulePath ?? process.execPath;`,
-          );
+        // Prepend plugin-sdk file embeds + derive $bunfs root
+        const sdkPreamble =
+          sdkImportLines.length > 0
+            ? sdkImportLines.join("\n") +
+              `\nconst __embeddedSdkRoot: string | null = ${sdkRootExpr};\n`
+            : "const __embeddedSdkRoot: string | null = null;\n";
+        const patched =
+          sdkPreamble +
+          original
+            .replace(
+              /import\s*\{\s*createJiti\s*\}\s*from\s*["']jiti["'];?/,
+              `const { createJiti } = ${jitiRequireExpr};`,
+            )
+            // In compiled binary, import.meta.url is /$bunfs/root/entry.js which
+            // breaks resolvePluginSdkAliasFile's directory traversal. Replace with
+            // process.execPath so it finds src/plugin-sdk/ next to the binary.
+            .replace(
+              /const\s+modulePath\s*=\s*params\.modulePath\s*\?\?\s*fileURLToPath\(import\.meta\.url\);/,
+              `const modulePath = params.modulePath ?? process.execPath;`,
+            )
+            // Add $bunfs path check at the start of resolvePluginSdkAliasFile
+            .replace(
+              /let cursor = path\.dirname\(modulePath\);/,
+              `// Bun compile: check embedded $bunfs plugin-sdk path first\n    if (__embeddedSdkRoot) {\n      const bunfsCandidate = path.join(__embeddedSdkRoot, params.distFile);\n      if (fs.existsSync(bunfsCandidate)) return bunfsCandidate;\n    }\n    let cursor = path.dirname(modulePath);`,
+            );
         return { contents: patched, loader: "ts" };
       });
 
@@ -469,8 +507,8 @@ function copySidecarLibs() {
 // The existing resolvePluginSdkAliasFile() already looks for dist/plugin-sdk/*.
 // ---------------------------------------------------------------------------
 
-async function bundlePluginSdk() {
-  const sdkOutDir = join(outdir, "dist", "plugin-sdk");
+async function bundlePluginSdk(targetDir?: string) {
+  const sdkOutDir = targetDir ?? join(outdir, "dist", "plugin-sdk");
   mkdirSync(sdkOutDir, { recursive: true });
 
   // Scoped entries from loader.ts (e.g. "openclaw/plugin-sdk/core" → core.ts → core.js)
@@ -581,6 +619,10 @@ async function installJiti() {
 rmSync(outdir, { recursive: true, force: true });
 mkdirSync(outdir, { recursive: true });
 
+// Pre-bundle plugin-sdk before Bun.build() so files can be embedded into $bunfs
+const sdkTempDir = join(outdir, ".plugin-sdk-prebuild");
+await bundlePluginSdk(sdkTempDir);
+
 const plugin = createNativeEmbedPlugin();
 const externals = buildExternals();
 const outfile = join(outdir, platform.os === "win32" ? "openclaw.exe" : "openclaw");
@@ -622,8 +664,8 @@ copyFileSync("package.json", join(outdir, "package.json"));
 cpSync("extensions", join(outdir, "extensions"), { recursive: true });
 cpSync("skills", join(outdir, "skills"), { recursive: true });
 
-// Bundle plugin-sdk as self-contained JS files for extension loading
-await bundlePluginSdk();
+// Clean up plugin-sdk pre-build temp dir (already embedded in binary)
+rmSync(sdkTempDir, { recursive: true, force: true });
 
 if (!existsSync("dist/control-ui")) {
   console.warn("[bun-compile] Warning: dist/control-ui not found. Run `pnpm ui:build` first.");
