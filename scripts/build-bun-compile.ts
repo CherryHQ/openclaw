@@ -1,116 +1,570 @@
 #!/usr/bin/env bun
+import {
+  copyFileSync,
+  cpSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { join, resolve } from "node:path";
+import { parseArgs } from "node:util";
 /**
- * Build openclaw as a standalone binary using `bun build --compile`.
+ * Build openclaw as a standalone binary using Bun's JS API with `compile`.
+ *
+ * Native .node addons (node-pty, sharp) are embedded into the binary via
+ * a bundler plugin that intercepts dynamic require() calls and redirects
+ * them to static paths — no file patching needed.
+ *
+ * Non-embeddable shared libraries (libvips, sqlite-vec) are copied to lib/.
  *
  * Usage:
- *   bun scripts/build-bun-compile.ts
- *   bun scripts/build-bun-compile.ts --target bun-linux-x64
+ *   bun scripts/build-bun-compile.ts                        # current platform
+ *   bun scripts/build-bun-compile.ts --target bun-linux-x64 # cross-compile
+ *   bun scripts/build-bun-compile.ts --skip-native          # skip native embedding
  */
-import { cpSync, existsSync, mkdirSync, rmSync, copyFileSync } from "node:fs";
-import { parseArgs } from "node:util";
+import type { BunPlugin } from "bun";
+
+// ---------------------------------------------------------------------------
+// CLI args
+// ---------------------------------------------------------------------------
 
 const { values } = parseArgs({
   args: process.argv.slice(2),
   options: {
     target: { type: "string" },
     outdir: { type: "string", default: "dist-bun" },
+    "skip-native": { type: "boolean", default: false },
   },
 });
 
 const outdir = values.outdir;
-const target = values.target;
+const bunTarget = values.target; // e.g. "bun-linux-x64"
+
+// ---------------------------------------------------------------------------
+// Platform detection
+// ---------------------------------------------------------------------------
+
+type TargetPlatform = {
+  os: string;
+  arch: string;
+  isCross: boolean;
+};
+
+function detectPlatform(target?: string): TargetPlatform {
+  if (!target) {
+    return { os: process.platform, arch: process.arch, isCross: false };
+  }
+  const parts = target.split("-");
+  const os = parts[1] === "windows" ? "win32" : parts[1];
+  const arch = parts[2];
+  const isCross = os !== process.platform || arch !== process.arch;
+  return { os, arch, isCross };
+}
+
+const platform = detectPlatform(bunTarget);
 
 console.log(`[bun-compile] Building openclaw binary...`);
 console.log(`[bun-compile] outdir: ${outdir}`);
-if (target) {
-  console.log(`[bun-compile] target: ${target}`);
+console.log(
+  `[bun-compile] platform: ${platform.os}-${platform.arch}${platform.isCross ? " (cross)" : ""}`,
+);
+
+// ---------------------------------------------------------------------------
+// pnpm package resolver
+// ---------------------------------------------------------------------------
+
+function findInPnpm(packageName: string, parentPackage?: string): string | null {
+  // Strategy 1: resolve via parent package's pnpm symlink
+  if (parentPackage) {
+    const parentHoisted = resolve(`node_modules/${parentPackage}`);
+    if (existsSync(parentHoisted)) {
+      try {
+        const parentReal = realpathSync(parentHoisted);
+        const lastNmIdx = parentReal.lastIndexOf("/node_modules/");
+        if (lastNmIdx !== -1) {
+          const nodeModulesDir = parentReal.slice(0, lastNmIdx + "/node_modules".length);
+          const candidate = resolve(nodeModulesDir, packageName);
+          if (existsSync(candidate)) {
+            return candidate;
+          }
+        }
+      } catch {
+        // fall through
+      }
+    }
+  }
+
+  // Strategy 2: glob search in .pnpm
+  const pnpmName = packageName.replace(/\//g, "+");
+  const pattern = `**/${pnpmName}@*/node_modules/${packageName}`;
+  const glob = new Bun.Glob(pattern);
+  for (const match of glob.scanSync({ cwd: resolve("node_modules/.pnpm"), absolute: true })) {
+    return match;
+  }
+  return null;
 }
 
-// Clean output dir
+// ---------------------------------------------------------------------------
+// Native embedding plugin
+//
+// Intercepts dynamic require() calls at bundle time and redirects them to
+// static paths so Bun can embed the .node files into the binary.
+// ---------------------------------------------------------------------------
+
+function createNativeEmbedPlugin(): BunPlugin {
+  const { os, arch } = platform;
+  const embedNative = !values["skip-native"] && !platform.isCross;
+
+  // Resolve paths once
+  const ptyPlatformPkg = `@lydell/node-pty-${os}-${arch}`;
+  const ptyPkgDir = embedNative ? findInPnpm(ptyPlatformPkg, "@lydell/node-pty") : null;
+  const ptyNodeDir = os === "win32" ? "build/Release" : `prebuilds/${os}-${arch}`;
+  const ptyNodeFile = ptyPkgDir ? resolve(ptyPkgDir, ptyNodeDir, "pty.node") : null;
+
+  const sharpPlatform = os === "win32" ? `win32-${arch}` : `${os}-${arch}`;
+  const sharpPkgDir =
+    embedNative && os !== "darwin" ? findInPnpm(`@img/sharp-${sharpPlatform}`) : null;
+  const sharpNodeFile =
+    sharpPkgDir && existsSync(resolve(sharpPkgDir, `lib/sharp-${sharpPlatform}.node`))
+      ? resolve(sharpPkgDir, `lib/sharp-${sharpPlatform}.node`)
+      : null;
+
+  if (ptyPkgDir && ptyNodeFile && existsSync(ptyNodeFile)) {
+    console.log(`[bun-compile] Will embed node-pty: ${ptyNodeFile}`);
+  }
+  if (sharpNodeFile) {
+    console.log(`[bun-compile] Will embed sharp: ${sharpNodeFile}`);
+    // Patch rpath for macOS/Linux so libvips resolves from @executable_path/lib/
+    if (os === "darwin") {
+      try {
+        const patched = `/tmp/sharp-${sharpPlatform}-patched.node`;
+        copyFileSync(sharpNodeFile, patched);
+        Bun.spawnSync(["install_name_tool", "-add_rpath", "@executable_path/lib", patched]);
+      } catch {
+        // best-effort
+      }
+    }
+  }
+
+  return {
+    name: "native-embed",
+    setup(build) {
+      // --- node-pty: redirect @lydell/node-pty → platform-specific package ---
+      if (ptyPkgDir) {
+        build.onResolve({ filter: /^@lydell\/node-pty$/ }, () => {
+          return { path: resolve(ptyPkgDir, "lib/index.js") };
+        });
+      }
+
+      // Replace utils.js loadNativeModule with static require of pty.node
+      if (ptyNodeFile && existsSync(ptyNodeFile)) {
+        const utilsPattern = new RegExp(
+          `node-pty-${os}-${arch.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\/lib\\/utils\\.js$`,
+        );
+        build.onLoad({ filter: utilsPattern }, () => {
+          return {
+            contents: `
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.loadNativeModule = exports.assign = void 0;
+function assign(target) {
+  var sources = [];
+  for (var i = 1; i < arguments.length; i++) sources[i - 1] = arguments[i];
+  sources.forEach(function (s) { return Object.keys(s).forEach(function (k) { return target[k] = s[k]; }); });
+  return target;
+}
+exports.assign = assign;
+function loadNativeModule(name) {
+  return { dir: "embedded", module: require("${ptyNodeFile}") };
+}
+exports.loadNativeModule = loadNativeModule;
+`,
+            loader: "js",
+          };
+        });
+      }
+
+      // --- sharp: redirect sharp/lib/sharp.js → static require of .node ---
+      if (sharpNodeFile) {
+        build.onLoad({ filter: /sharp\/lib\/sharp\.js$/ }, () => {
+          return {
+            contents: `module.exports = require("${sharpNodeFile}");\n`,
+            loader: "js",
+          };
+        });
+      }
+
+      // --- sqlite-vec: replace getLoadablePath to look next to binary ---
+      const extSuffix = os === "win32" ? "dll" : os === "darwin" ? "dylib" : "so";
+      build.onLoad({ filter: /sqlite-vec\/index\.cjs$/ }, () => {
+        return {
+          contents: `
+const { dirname, join } = require("node:path");
+const { statSync } = require("node:fs");
+
+function getLoadablePath() {
+  const dir = dirname(process.execPath);
+  const candidates = [
+    join(dir, "lib", "vec0.${extSuffix}"),
+    join(dir, "vec0.${extSuffix}"),
+  ];
+  for (const p of candidates) {
+    if (statSync(p, { throwIfNoEntry: false })) return p;
+  }
+  throw new Error("sqlite-vec extension not found. Expected vec0.${extSuffix} in lib/ next to the binary.");
+}
+function load(db) { db.loadExtension(getLoadablePath()); }
+module.exports = { getLoadablePath, load };
+`,
+          loader: "js",
+        };
+      });
+
+      build.onLoad({ filter: /sqlite-vec\/index\.mjs$/ }, () => {
+        return {
+          contents: `
+import { dirname, join } from "node:path";
+import { statSync } from "node:fs";
+
+function getLoadablePath() {
+  const dir = dirname(process.execPath);
+  const candidates = [
+    join(dir, "lib", "vec0.${extSuffix}"),
+    join(dir, "vec0.${extSuffix}"),
+  ];
+  for (const p of candidates) {
+    if (statSync(p, { throwIfNoEntry: false })) return p;
+  }
+  throw new Error("sqlite-vec extension not found. Expected vec0.${extSuffix} in lib/ next to the binary.");
+}
+function load(db) { db.loadExtension(getLoadablePath()); }
+export { getLoadablePath, load };
+`,
+          loader: "js",
+        };
+      });
+
+      console.log(`[bun-compile] Plugin: sqlite-vec → look for lib/vec0.${extSuffix}`);
+
+      // --- jiti: resolve from sidecar node_modules next to binary ---
+      // Bun compiled binaries need full file paths for require(), not package names.
+      // require("path/to/jiti") fails but require("path/to/jiti/lib/jiti.cjs") works.
+      const jitiRequireExpr = `require(require("node:path").join(require("node:path").dirname(process.execPath), "node_modules", "jiti", "lib", "jiti.cjs"))`;
+
+      build.onLoad({ filter: /plugins\/loader\.ts$/ }, (args) => {
+        const original = readFileSync(args.path, "utf-8");
+        const patched = original
+          .replace(
+            /import\s*\{\s*createJiti\s*\}\s*from\s*["']jiti["'];?/,
+            `const { createJiti } = ${jitiRequireExpr};`,
+          )
+          // In compiled binary, import.meta.url is /$bunfs/root/entry.js which
+          // breaks resolvePluginSdkAliasFile's directory traversal. Replace with
+          // process.execPath so it finds src/plugin-sdk/ next to the binary.
+          .replace(
+            /const\s+modulePath\s*=\s*params\.modulePath\s*\?\?\s*fileURLToPath\(import\.meta\.url\);/,
+            `const modulePath = params.modulePath ?? process.execPath;`,
+          );
+        return { contents: patched, loader: "ts" };
+      });
+
+      build.onLoad({ filter: /plugin-sdk\/root-alias\.cjs$/ }, (args) => {
+        const original = readFileSync(args.path, "utf-8");
+        const patched = original.replace(
+          /const\s*\{\s*createJiti\s*\}\s*=\s*require\(["']jiti["']\);?/,
+          `const { createJiti } = ${jitiRequireExpr};`,
+        );
+        return { contents: patched, loader: "js" };
+      });
+
+      console.log("[bun-compile] Plugin: jiti → resolve from sidecar node_modules");
+
+      // --- ajv: schema-validator uses createRequire + require("ajv") which
+      // creates a separate require scope the bundler can't follow.
+      // Add a top-level import and replace the dynamic require with it. ---
+      build.onLoad({ filter: /plugins\/schema-validator\.ts$/ }, (args) => {
+        const original = readFileSync(args.path, "utf-8");
+        const patched = original
+          .replace(
+            /import\s*\{\s*createRequire\s*\}\s*from\s*["']node:module["'];?/,
+            `import _ajvPkg from "ajv";`,
+          )
+          .replace(/const\s+require\s*=\s*createRequire\([^)]+\);?\n?/, "")
+          .replace(
+            /const\s+ajvModule\s*=\s*require\(["']ajv["']\)\s*as\s*[^;]+;/,
+            `const ajvModule = _ajvPkg as unknown as { default?: new (opts?: object) => AjvLike };`,
+          );
+        return { contents: patched, loader: "ts" };
+      });
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Build externals list
+// ---------------------------------------------------------------------------
+
+function buildExternals(): string[] {
+  const { os } = platform;
+  const list = [
+    "opusscript",
+    "@discordjs/opus",
+    "node-llama-cpp",
+    "@node-llama-cpp/*",
+    "ffmpeg-static",
+    "electron",
+    "chromium-bidi",
+    "chromium-bidi/*",
+    "playwright-core",
+    "authenticate-pam",
+    "@napi-rs/canvas",
+    "@matrix-org/matrix-sdk-crypto-nodejs",
+    "koffi",
+  ];
+
+  // macOS uses sips for image processing, no need for sharp
+  if (os === "darwin") {
+    list.push("sharp", "@img/sharp-*");
+  }
+  if (os !== "darwin") {
+    list.push("detect-libc");
+  }
+
+  // Dead-code branches for the other OS terminal
+  if (os === "win32") {
+    list.push("./unixTerminal");
+  } else {
+    list.push("./windowsTerminal");
+  }
+
+  return list;
+}
+
+// ---------------------------------------------------------------------------
+// Copy non-embeddable native shared libraries to lib/
+// ---------------------------------------------------------------------------
+
+function copySidecarLibs() {
+  const { os, arch } = platform;
+  const libDir = join(outdir, "lib");
+  mkdirSync(libDir, { recursive: true });
+  let copied = 0;
+
+  // sqlite-vec: vec0.{dylib|so|dll}
+  const extSuffix = os === "win32" ? "dll" : os === "darwin" ? "dylib" : "so";
+  const sqliteVecOs = os === "win32" ? "windows" : os === "darwin" ? "darwin" : "linux";
+  const vecPkg = findInPnpm(`sqlite-vec-${sqliteVecOs}-${arch}`, "sqlite-vec");
+  if (vecPkg) {
+    const vecFile = join(vecPkg, `vec0.${extSuffix}`);
+    if (existsSync(vecFile)) {
+      copyFileSync(vecFile, join(libDir, `vec0.${extSuffix}`));
+      console.log(`[bun-compile] Copied vec0.${extSuffix} → lib/`);
+      copied++;
+    }
+  } else {
+    console.warn(`[bun-compile] Warning: sqlite-vec-${sqliteVecOs}-${arch} not found`);
+  }
+
+  // sharp's libvips (Linux/Windows only)
+  if (os !== "darwin") {
+    const sharpPlatform = os === "win32" ? `win32-${arch}` : `${os}-${arch}`;
+    const libvipsPkg = findInPnpm(`@img/sharp-libvips-${sharpPlatform}`);
+    if (libvipsPkg) {
+      const libvipsGlob = new Bun.Glob("lib/libvips*");
+      for (const match of libvipsGlob.scanSync({ cwd: libvipsPkg, absolute: true })) {
+        const filename = match.split("/").pop()!;
+        copyFileSync(match, join(libDir, filename));
+        console.log(`[bun-compile] Copied ${filename} → lib/`);
+        copied++;
+      }
+    }
+  }
+
+  if (copied === 0) {
+    rmSync(libDir, { recursive: true, force: true });
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Bundle plugin-sdk entries as self-contained JS files.
+//
+// Extensions import "openclaw/plugin-sdk/*" at runtime via jiti.
+// These plugin-sdk files re-export from deep in src/ (../plugins/, ../infra/).
+// In a compiled binary, the source tree isn't on disk, so jiti can't resolve them.
+// Solution: pre-bundle each entry into a standalone JS file under dist/plugin-sdk/.
+// The existing resolvePluginSdkAliasFile() already looks for dist/plugin-sdk/*.
+// ---------------------------------------------------------------------------
+
+async function bundlePluginSdk() {
+  const sdkOutDir = join(outdir, "dist", "plugin-sdk");
+  mkdirSync(sdkOutDir, { recursive: true });
+
+  // Scoped entries from loader.ts (e.g. "openclaw/plugin-sdk/core" → core.ts → core.js)
+  const scopedEntries = new Bun.Glob("*.ts").scanSync({
+    cwd: resolve("src/plugin-sdk"),
+    absolute: true,
+  });
+  const entrypoints: string[] = [];
+  for (const entry of scopedEntries) {
+    // Skip test files
+    if (entry.endsWith(".test.ts")) {
+      continue;
+    }
+    entrypoints.push(entry);
+  }
+
+  // These deps are optional/platform-specific and shouldn't be pulled into the SDK bundle
+  const sdkExternals = buildExternals();
+
+  // Bundle all entries at once for speed
+  const sdkResult = await Bun.build({
+    entrypoints,
+    outdir: sdkOutDir,
+    target: "bun",
+    format: "esm",
+    minify: true,
+    splitting: true,
+    external: sdkExternals,
+  });
+
+  if (!sdkResult.success) {
+    console.error("[bun-compile] Plugin SDK bundle failed:");
+    for (const log of sdkResult.logs) {
+      console.error("  ", log.message || log);
+    }
+    process.exit(1);
+  }
+
+  // Also bundle root-alias.cjs (CJS format for require("openclaw/plugin-sdk"))
+  const rootAliasResult = await Bun.build({
+    entrypoints: [resolve("src/plugin-sdk/root-alias.cjs")],
+    outdir: sdkOutDir,
+    target: "bun",
+    format: "cjs",
+    minify: true,
+    external: sdkExternals,
+  });
+
+  if (!rootAliasResult.success) {
+    console.error("[bun-compile] Plugin SDK root-alias bundle failed:");
+    for (const log of rootAliasResult.logs) {
+      console.error("  ", log.message || log);
+    }
+    // Non-fatal: root-alias is a fallback, scoped entries are more important
+  }
+
+  const entryCount = sdkResult.outputs.filter((o) => o.kind === "entry-point").length;
+  console.log(`[bun-compile] Bundled ${entryCount} plugin-sdk entries → dist/plugin-sdk/`);
+}
+
+// ---------------------------------------------------------------------------
+// Install jiti (pure JS, needed at runtime for plugin loading)
+// ---------------------------------------------------------------------------
+
+async function installJiti() {
+  const rootPkg = JSON.parse(await Bun.file("package.json").text()) as {
+    dependencies?: Record<string, string>;
+  };
+  const jitiVersion = rootPkg.dependencies?.jiti;
+  if (!jitiVersion) {
+    console.warn("[bun-compile] Warning: jiti not in dependencies, skipping");
+    return;
+  }
+
+  const sidecarPkg = {
+    name: "openclaw-sidecar",
+    private: true,
+    dependencies: { jiti: jitiVersion },
+  };
+
+  const mainPkgPath = join(outdir, "package.json");
+  const mainPkgBackup = join(outdir, "package.json.bak");
+
+  copyFileSync(mainPkgPath, mainPkgBackup);
+  writeFileSync(mainPkgPath, JSON.stringify(sidecarPkg, null, 2));
+
+  const installProc = Bun.spawn(["npm", "install", "--omit=dev", "--no-package-lock"], {
+    stdout: "inherit",
+    stderr: "inherit",
+    cwd: outdir,
+  });
+  const installExit = await installProc.exited;
+
+  copyFileSync(mainPkgBackup, mainPkgPath);
+  rmSync(mainPkgBackup, { force: true });
+
+  if (installExit !== 0) {
+    console.error(`[bun-compile] jiti install failed (exit ${installExit})`);
+    process.exit(installExit);
+  }
+  console.log("[bun-compile] Installed jiti to sidecar node_modules/.");
+}
+
+// ---------------------------------------------------------------------------
+// Main
+// ---------------------------------------------------------------------------
+
 rmSync(outdir, { recursive: true, force: true });
 mkdirSync(outdir, { recursive: true });
 
-// NOTE: --compile and --splitting are mutually exclusive in Bun.
-// All code is bundled into a single file inside the binary.
-const externals = [
-  // Native modules — resolved at runtime from sidecar node_modules/
-  "sharp",
-  "@img/sharp-*",
-  "@lydell/node-pty",
-  "sqlite-vec",
-  "opusscript",
-  "@discordjs/opus",
-  "node-llama-cpp",
-  "@node-llama-cpp/*",
-  // Plugin loader needs runtime filesystem access
-  "jiti",
-  // Optional/platform-specific deps that bundler can't resolve
-  "ffmpeg-static",
-  "electron",
-  "chromium-bidi",
-  "chromium-bidi/*",
-  "playwright-core",
-  "authenticate-pam",
-  "@napi-rs/canvas",
-  "@matrix-org/matrix-sdk-crypto-nodejs",
-  "koffi",
-];
+const plugin = createNativeEmbedPlugin();
+const externals = buildExternals();
+const outfile = join(outdir, platform.os === "win32" ? "openclaw.exe" : "openclaw");
 
-const args = [
-  "bun",
-  "build",
-  "--compile",
-  "--minify",
-  "--sourcemap",
-  "./src/entry.ts",
-  "--outfile",
-  `${outdir}/openclaw`,
-  ...externals.flatMap((ext) => ["--external", ext]),
-];
-
-if (target) {
-  args.push("--target", target);
+// Build compile options
+const compileOptions: Record<string, unknown> = { outfile };
+if (bunTarget) {
+  compileOptions.target = bunTarget;
 }
 
-console.log(`[bun-compile] Running: ${args.join(" ")}`);
+console.log(`[bun-compile] Building with Bun.build() JS API...`);
 
-const proc = Bun.spawn(args, {
-  stdout: "inherit",
-  stderr: "inherit",
-  env: {
-    ...process.env,
-    OPENCLAW_NO_RESPAWN: "1",
-  },
+const result = await Bun.build({
+  entrypoints: ["./src/entry.ts"],
+  compile: compileOptions as { outfile: string; target?: string },
+  plugins: [plugin],
+  external: externals,
+  minify: true,
+  env: "OPENCLAW_NO_RESPAWN*",
 });
 
-const exitCode = await proc.exited;
-if (exitCode !== 0) {
-  console.error(`[bun-compile] Build failed with exit code ${exitCode}`);
-  process.exit(exitCode);
+if (!result.success) {
+  console.error("[bun-compile] Build failed:");
+  for (const log of result.logs) {
+    console.error("  ", log.message || log);
+  }
+  process.exit(1);
 }
 
-console.log(`[bun-compile] Build succeeded.`);
+console.log("[bun-compile] Build succeeded.");
+console.log(
+  `[bun-compile] Binary: ${outfile} (${((result.outputs[0]?.size ?? 0) / 1024 / 1024) | 0}MB)`,
+);
 
-// Copy sidecar files that the binary needs at runtime.
-console.log(`[bun-compile] Copying sidecar files...`);
+// Copy sidecar files
+console.log("[bun-compile] Copying sidecar files...");
 
-// package.json — needed by @mariozechner/pi-coding-agent at startup
-copyFileSync("package.json", `${outdir}/package.json`);
+copyFileSync("package.json", join(outdir, "package.json"));
+cpSync("extensions", join(outdir, "extensions"), { recursive: true });
+cpSync("skills", join(outdir, "skills"), { recursive: true });
 
-// Bundled extensions (plugins)
-cpSync("extensions", `${outdir}/extensions`, { recursive: true });
+// Bundle plugin-sdk as self-contained JS files for extension loading
+await bundlePluginSdk();
 
-// Bundled skills
-cpSync("skills", `${outdir}/skills`, { recursive: true });
-
-// Control UI static assets (build with `pnpm ui:build` first)
 if (existsSync("dist/control-ui")) {
-  cpSync("dist/control-ui", `${outdir}/control-ui`, { recursive: true });
-  console.log(`[bun-compile] Copied control-ui assets.`);
+  cpSync("dist/control-ui", join(outdir, "control-ui"), { recursive: true });
+  console.log("[bun-compile] Copied control-ui assets.");
 } else {
-  console.warn(
-    `[bun-compile] Warning: dist/control-ui not found. Run \`pnpm ui:build\` first for Control UI support.`,
-  );
+  console.warn("[bun-compile] Warning: dist/control-ui not found. Run `pnpm ui:build` first.");
 }
 
-console.log(`[bun-compile] Done.`);
+// Copy native shared libraries that can't be embedded
+if (!values["skip-native"]) {
+  copySidecarLibs();
+  await installJiti();
+}
+
+console.log("[bun-compile] Done.");
