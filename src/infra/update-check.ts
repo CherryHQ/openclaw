@@ -500,3 +500,71 @@ export async function checkUpdateStatus(params: {
     registry,
   };
 }
+
+export type GitHubReleaseInfo = {
+  tagName: string;
+  version: string;
+  prerelease: boolean;
+  assets: Array<{ name: string; url: string; size: number }>;
+};
+
+const GITHUB_RELEASES_API = "https://api.github.com/repos/CherryHQ/cherry-studio/releases";
+
+export async function fetchGitHubRelease(params: {
+  channel: UpdateChannel;
+  timeoutMs?: number;
+}): Promise<GitHubReleaseInfo | null> {
+  const timeoutMs = params.timeoutMs ?? 5000;
+  try {
+    const url = params.channel === "beta" ? GITHUB_RELEASES_API : `${GITHUB_RELEASES_API}/latest`;
+
+    const res = await fetchWithTimeout(
+      url,
+      { headers: { Accept: "application/vnd.github.v3+json", "User-Agent": "openclaw-updater" } },
+      Math.max(500, timeoutMs),
+    );
+    if (!res.ok) {
+      return null;
+    }
+
+    const json = await res.json();
+
+    // For beta, find the first prerelease; for stable, /latest already returns the latest non-prerelease
+    const release =
+      params.channel === "beta"
+        ? Array.isArray(json)
+          ? ((json as Array<Record<string, unknown>>).find((r) => r.prerelease) ?? json[0])
+          : json
+        : json;
+
+    if (!release?.tag_name) {
+      return null;
+    }
+
+    const tagName = String(release.tag_name);
+    const version = tagName.startsWith("v") ? tagName.slice(1) : tagName;
+
+    type RawAsset = { name?: string; browser_download_url?: string; size?: number };
+    const rawAssets = (release.assets ?? []) as RawAsset[];
+
+    return {
+      tagName,
+      version,
+      prerelease: Boolean(release.prerelease),
+      assets: rawAssets.map((a) => ({
+        name: a.name ?? "",
+        url: a.browser_download_url ?? "",
+        size: Number(a.size ?? 0),
+      })),
+    };
+  } catch {
+    return null;
+  }
+}
+
+export function resolveReleaseAssetName(): string {
+  const plat = process.platform === "win32" ? "windows" : process.platform;
+  const arch = process.arch;
+  const ext = process.platform === "win32" ? "zip" : "tar.gz";
+  return `openclaw-${plat}-${arch}.${ext}`;
+}
