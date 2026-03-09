@@ -223,7 +223,7 @@ export async function ensureGitCheckout(params: {
 
 export async function resolveGlobalManager(params: {
   root: string;
-  installKind: "git" | "package" | "unknown";
+  installKind: "git" | "package" | "binary" | "unknown";
   timeoutMs: number;
 }): Promise<GlobalInstallManager> {
   const runCommand = createGlobalCommandRunner();

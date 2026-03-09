@@ -41,7 +41,7 @@ export type NpmTagStatus = {
 
 export type UpdateCheckResult = {
   root: string | null;
-  installKind: "git" | "package" | "unknown";
+  installKind: "git" | "package" | "binary" | "unknown";
   packageManager: PackageManager;
   git?: GitUpdateStatus;
   deps?: DepsStatus;
@@ -61,6 +61,15 @@ export function formatGitInstallLabel(update: UpdateCheckResult): string | null 
     shortSha ? `@ ${shortSha}` : null,
   ].filter(Boolean);
   return parts.join(" · ");
+}
+
+export function isBinaryInstall(): boolean {
+  const execBase = path.basename(process.execPath).toLowerCase();
+  const nodeOrBun = new Set(["node", "node.exe", "bun", "bun.exe"]);
+  if (nodeOrBun.has(execBase)) {
+    return false;
+  }
+  return execBase === "openclaw" || execBase === "openclaw.exe";
 }
 
 async function exists(p: string): Promise<boolean> {
@@ -467,7 +476,11 @@ export async function checkUpdateStatus(params: {
   const gitRoot = await detectGitRoot(root);
   const isGit = gitRoot && path.resolve(gitRoot) === root;
 
-  const installKind: UpdateCheckResult["installKind"] = isGit ? "git" : "package";
+  const installKind: UpdateCheckResult["installKind"] = isBinaryInstall()
+    ? "binary"
+    : isGit
+      ? "git"
+      : "package";
   const git = isGit
     ? await checkGitUpdateStatus({
         root,
