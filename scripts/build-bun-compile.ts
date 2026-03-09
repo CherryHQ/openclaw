@@ -82,7 +82,7 @@ function findInPnpm(packageName: string, parentPackage?: string): string | null 
     const parentHoisted = resolve(`node_modules/${parentPackage}`);
     if (existsSync(parentHoisted)) {
       try {
-        const parentReal = realpathSync(parentHoisted);
+        const parentReal = realpathSync(parentHoisted).replace(/\\/g, "/");
         const lastNmIdx = parentReal.lastIndexOf("/node_modules/");
         if (lastNmIdx !== -1) {
           const nodeModulesDir = parentReal.slice(0, lastNmIdx + "/node_modules".length);
@@ -162,7 +162,7 @@ function createNativeEmbedPlugin(): BunPlugin {
       // Replace utils.js loadNativeModule with static require of pty.node
       if (ptyNodeFile && existsSync(ptyNodeFile)) {
         const utilsPattern = new RegExp(
-          `node-pty-${os}-${arch.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\/lib\\/utils\\.js$`,
+          `node-pty-${os}-${arch.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}[/\\\\]lib[/\\\\]utils\\.js$`,
         );
         build.onLoad({ filter: utilsPattern }, () => {
           return {
@@ -189,7 +189,7 @@ exports.loadNativeModule = loadNativeModule;
 
       // --- sharp: redirect sharp/lib/sharp.js → static require of .node ---
       if (sharpNodeFile) {
-        build.onLoad({ filter: /sharp\/lib\/sharp\.js$/ }, () => {
+        build.onLoad({ filter: /sharp[/\\]lib[/\\]sharp\.js$/ }, () => {
           return {
             contents: `module.exports = require("${sharpNodeFile}");\n`,
             loader: "js",
@@ -199,7 +199,7 @@ exports.loadNativeModule = loadNativeModule;
 
       // --- sqlite-vec: replace getLoadablePath to look next to binary ---
       const extSuffix = os === "win32" ? "dll" : os === "darwin" ? "dylib" : "so";
-      build.onLoad({ filter: /sqlite-vec\/index\.cjs$/ }, () => {
+      build.onLoad({ filter: /sqlite-vec[/\\]index\.cjs$/ }, () => {
         return {
           contents: `
 const { dirname, join } = require("node:path");
@@ -223,7 +223,7 @@ module.exports = { getLoadablePath, load };
         };
       });
 
-      build.onLoad({ filter: /sqlite-vec\/index\.mjs$/ }, () => {
+      build.onLoad({ filter: /sqlite-vec[/\\]index\.mjs$/ }, () => {
         return {
           contents: `
 import { dirname, join } from "node:path";
@@ -254,7 +254,7 @@ export { getLoadablePath, load };
       // require("path/to/jiti") fails but require("path/to/jiti/lib/jiti.cjs") works.
       const jitiRequireExpr = `require(require("node:path").join(require("node:path").dirname(process.execPath), "node_modules", "jiti", "lib", "jiti.cjs"))`;
 
-      build.onLoad({ filter: /plugins\/loader\.ts$/ }, (args) => {
+      build.onLoad({ filter: /plugins[/\\]loader\.ts$/ }, (args) => {
         const original = readFileSync(args.path, "utf-8");
         const patched = original
           .replace(
@@ -271,7 +271,7 @@ export { getLoadablePath, load };
         return { contents: patched, loader: "ts" };
       });
 
-      build.onLoad({ filter: /plugin-sdk\/root-alias\.cjs$/ }, (args) => {
+      build.onLoad({ filter: /plugin-sdk[/\\]root-alias\.cjs$/ }, (args) => {
         const original = readFileSync(args.path, "utf-8");
         const patched = original.replace(
           /const\s*\{\s*createJiti\s*\}\s*=\s*require\(["']jiti["']\);?/,
@@ -285,7 +285,7 @@ export { getLoadablePath, load };
       // --- ajv: schema-validator uses createRequire + require("ajv") which
       // creates a separate require scope the bundler can't follow.
       // Add a top-level import and replace the dynamic require with it. ---
-      build.onLoad({ filter: /plugins\/schema-validator\.ts$/ }, (args) => {
+      build.onLoad({ filter: /plugins[/\\]schema-validator\.ts$/ }, (args) => {
         const original = readFileSync(args.path, "utf-8");
         const patched = original
           .replace(
