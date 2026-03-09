@@ -1,6 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import { isBunRuntime, isNodeRuntime } from "./runtime-binary.js";
+import { isBunCompiledBinary, isBunRuntime, isNodeRuntime } from "./runtime-binary.js";
 
 type GatewayProgramArgs = {
   programArguments: string[];
@@ -163,6 +163,11 @@ async function resolveCliProgramArguments(params: {
   runtime?: GatewayRuntimePreference;
   nodePath?: string;
 }): Promise<GatewayProgramArgs> {
+  // Bun compiled binary: the binary IS the entrypoint, no separate runtime needed
+  if (isBunCompiledBinary()) {
+    return { programArguments: [process.execPath, ...params.args] };
+  }
+
   const execPath = process.execPath;
   const runtime = params.runtime ?? "auto";
 

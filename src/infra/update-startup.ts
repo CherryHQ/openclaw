@@ -4,6 +4,7 @@ import path from "node:path";
 import { formatCliCommand } from "../cli/command-format.js";
 import type { loadConfig } from "../config/config.js";
 import { resolveStateDir } from "../config/paths.js";
+import { isBunCompiledBinary } from "../daemon/runtime-binary.js";
 import { runCommandWithTimeout } from "../process/exec.js";
 import { VERSION } from "../version.js";
 import { writeJsonAtomic } from "./json-files.js";
@@ -243,7 +244,10 @@ async function runAutoUpdateCommand(params: {
     lowerExecBase === "bun" ||
     lowerExecBase === "bun.exe";
   const argv: string[] = [];
-  if (execPath && argv1) {
+  if (isBunCompiledBinary() && execPath) {
+    // Compiled binary: execPath IS the CLI, no script argument needed
+    argv.push(execPath, ...baseArgs);
+  } else if (execPath && argv1) {
     argv.push(execPath, argv1, ...baseArgs);
   } else if (execPath && !runtimeIsNodeOrBun) {
     argv.push(execPath, ...baseArgs);
