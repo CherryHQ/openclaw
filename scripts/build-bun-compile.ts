@@ -303,6 +303,56 @@ export { getLoadablePath, load };
 
       console.log("[bun-compile] Plugin: jiti → resolve from sidecar node_modules");
 
+      // --- control-ui: embed static assets into binary via $bunfs ---
+      // At build time, scan dist/control-ui/ and generate import statements for
+      // each file using `import ... with { type: "file" }`. This causes Bun to
+      // embed them into the binary at $bunfs paths. Then patch resolveControlUiRootSync
+      // to check the $bunfs root directory as a candidate.
+      if (existsSync(resolve("dist/control-ui/index.html"))) {
+        const controlUiDir = resolve("dist/control-ui");
+        const controlUiFiles: string[] = [];
+        const scanDir = (dir: string) => {
+          for (const entry of readdirSync(dir, { withFileTypes: true })) {
+            const fullPath = join(dir, entry.name);
+            if (entry.isDirectory()) {
+              scanDir(fullPath);
+            } else {
+              controlUiFiles.push(fullPath);
+            }
+          }
+        };
+        scanDir(controlUiDir);
+
+        // Generate import lines that embed each file into $bunfs
+        const importLines = controlUiFiles.map(
+          (f, i) => `import __cui${i} from ${JSON.stringify(f)} with { type: "file" };`,
+        );
+        // Use the index.html import to derive the $bunfs root at runtime
+        const indexImportIdx = controlUiFiles.findIndex((f) => f.endsWith("index.html"));
+        const rootExpr =
+          indexImportIdx >= 0
+            ? `__cui${indexImportIdx}.replace(/[\\\\/]index\\.html$/, "")`
+            : "null";
+
+        build.onLoad({ filter: /infra[/\\]control-ui-assets\.ts$/ }, (args) => {
+          const original = readFileSync(args.path, "utf-8");
+          // Inject embedded file imports and add $bunfs root as first candidate
+          const patched =
+            importLines.join("\n") +
+            `\nconst __embeddedControlUiRoot: string | null = ${rootExpr};\n` +
+            original.replace(
+              // Insert after "Packaged app" addCandidate line
+              /addCandidate\(candidates, execDir \? path\.join\(execDir, "control-ui"\) : null\);/,
+              `$&\n  // Bun compile: check embedded $bunfs path\n  addCandidate(candidates, __embeddedControlUiRoot);`,
+            );
+          return { contents: patched, loader: "ts" };
+        });
+
+        console.log(
+          `[bun-compile] Plugin: control-ui → embedding ${controlUiFiles.length} files into binary`,
+        );
+      }
+
       // --- ajv: schema-validator uses createRequire + require("ajv") which
       // creates a separate require scope the bundler can't follow.
       // Add a top-level import and replace the dynamic require with it. ---
@@ -575,11 +625,9 @@ cpSync("skills", join(outdir, "skills"), { recursive: true });
 // Bundle plugin-sdk as self-contained JS files for extension loading
 await bundlePluginSdk();
 
-if (existsSync("dist/control-ui")) {
-  cpSync("dist/control-ui", join(outdir, "control-ui"), { recursive: true });
-  console.log("[bun-compile] Copied control-ui assets.");
-} else {
+if (!existsSync("dist/control-ui")) {
   console.warn("[bun-compile] Warning: dist/control-ui not found. Run `pnpm ui:build` first.");
+  console.warn("[bun-compile] Control UI will not be available in the binary.");
 }
 
 // Copy native shared libraries that can't be embedded
