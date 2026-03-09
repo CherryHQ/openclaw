@@ -130,6 +130,11 @@ function findInPnpm(packageName: string, parentPackage?: string): string | null 
 // static paths so Bun can embed the .node files into the binary.
 // ---------------------------------------------------------------------------
 
+// Escape backslashes in paths for embedding inside JS string literals
+function jsPath(p: string): string {
+  return p.replace(/\\/g, "\\\\");
+}
+
 function createNativeEmbedPlugin(): BunPlugin {
   const { os, arch } = platform;
   const embedNative = !values["skip-native"] && !platform.isCross;
@@ -194,7 +199,7 @@ function assign(target) {
 }
 exports.assign = assign;
 function loadNativeModule(name) {
-  return { dir: "embedded", module: require("${ptyNodeFile}") };
+  return { dir: "embedded", module: require("${jsPath(ptyNodeFile)}") };
 }
 exports.loadNativeModule = loadNativeModule;
 `,
@@ -207,7 +212,7 @@ exports.loadNativeModule = loadNativeModule;
       if (sharpNodeFile) {
         build.onLoad({ filter: /sharp[/\\]lib[/\\]sharp\.js$/ }, () => {
           return {
-            contents: `module.exports = require("${sharpNodeFile}");\n`,
+            contents: `module.exports = require("${jsPath(sharpNodeFile)}");\n`,
             loader: "js",
           };
         });
