@@ -508,19 +508,27 @@ export type GitHubReleaseInfo = {
   assets: Array<{ name: string; url: string; size: number }>;
 };
 
-const GITHUB_RELEASES_API = "https://api.github.com/repos/CherryHQ/cherry-studio/releases";
-
 export async function fetchGitHubRelease(params: {
   channel: UpdateChannel;
   timeoutMs?: number;
 }): Promise<GitHubReleaseInfo | null> {
   const timeoutMs = params.timeoutMs ?? 5000;
   try {
-    const url = params.channel === "beta" ? GITHUB_RELEASES_API : `${GITHUB_RELEASES_API}/latest`;
+    const { resolveUpdateMirror, getMirrorConfig } = await import("./update-mirror.js");
+    const mirror = await resolveUpdateMirror({ timeoutMs: Math.min(3000, timeoutMs) });
+    const mirrorConfig = getMirrorConfig(mirror);
+    const releasesApi = mirrorConfig.releasesApi;
+
+    const url = params.channel === "beta" ? releasesApi : `${releasesApi}/latest`;
 
     const res = await fetchWithTimeout(
       url,
-      { headers: { Accept: "application/vnd.github.v3+json", "User-Agent": "openclaw-updater" } },
+      {
+        headers: {
+          Accept: mirrorConfig.acceptHeader,
+          "User-Agent": "openclaw-updater",
+        },
+      },
       Math.max(500, timeoutMs),
     );
     if (!res.ok) {
