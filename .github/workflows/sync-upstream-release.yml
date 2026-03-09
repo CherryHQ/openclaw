@@ -33,11 +33,13 @@ jobs:
 
       - name: Determine target tag
         id: target
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
         run: |
           set -euo pipefail
 
-          if [ -n "${{ inputs.tag }}" ]; then
-            TAG="${{ inputs.tag }}"
+          if [ -n "$INPUT_TAG" ]; then
+            TAG="$INPUT_TAG"
             if ! git rev-parse "$TAG" >/dev/null 2>&1; then
               echo "::error::Tag $TAG not found in upstream"
               exit 1
