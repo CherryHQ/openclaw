@@ -705,8 +705,10 @@ export async function updateCommand(opts: UpdateCommandOptions): Promise<void> {
   }
 
   if (opts.dryRun) {
-    let mode: UpdateRunResult["mode"] = "unknown";
-    if (updateInstallKind === "git") {
+    let mode: UpdateDryRunPreview["mode"] = "unknown";
+    if (updateInstallKind === "binary") {
+      mode = "binary";
+    } else if (updateInstallKind === "git") {
       mode = "git";
     } else if (updateInstallKind === "package") {
       mode = await resolveGlobalManager({
@@ -720,7 +722,9 @@ export async function updateCommand(opts: UpdateCommandOptions): Promise<void> {
     if (requestedChannel && requestedChannel !== storedChannel) {
       actions.push(`Persist update.channel=${requestedChannel} in config`);
     }
-    if (switchToGit) {
+    if (isBinaryInstall()) {
+      actions.push(`Download and replace binary from GitHub release (${tag})`);
+    } else if (switchToGit) {
       actions.push("Switch install mode from package to git checkout (dev channel)");
     } else if (switchToPackage) {
       actions.push(`Switch install mode from git to package manager (${mode})`);
