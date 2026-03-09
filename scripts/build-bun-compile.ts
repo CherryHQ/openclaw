@@ -135,7 +135,7 @@ function jsPath(p: string): string {
   return p.replace(/\\/g, "\\\\");
 }
 
-function createNativeEmbedPlugin(): BunPlugin {
+function createNativeEmbedPlugin(embeddedSkills: EmbeddedSkillsData): BunPlugin {
   const { os, arch } = platform;
   const embedNative = !values["skip-native"] && !platform.isCross;
 
@@ -391,6 +391,192 @@ export { getLoadablePath, load };
         );
       }
 
+      // --- skills: embed skill files into binary with virtual FS overlay ---
+      // $bunfs flattens files (no directory structure) and doesn't support readdirSync.
+      // We create a virtual filesystem overlay:
+      //   1. Embed all files via `import with { type: "file" }` → get flat $bunfs paths
+      //   2. Build a virtual root dir (e.g. /$bunfs/root/__skills__/)
+      //   3. Monkey-patch readdirSync, readFileSync, existsSync to map virtual paths
+      //      back to real $bunfs paths using a build-time manifest + file map
+      if (embeddedSkills.files.length > 0) {
+        const skillImportLines = embeddedSkills.files.map(
+          (f, i) => `import __ski${i} from ${JSON.stringify(f.absPath)} with { type: "file" };`,
+        );
+
+        // Generate file map assignments: __fileMap["rel/path"] = __skiN;
+        const fileMapAssignments = embeddedSkills.files.map(
+          (f, i) => `  __skiFileMap[${JSON.stringify(f.relPath)}] = __ski${i};`,
+        );
+
+        build.onLoad({ filter: /[/\\]entry\.ts$/ }, (args) => {
+          let original = readFileSync(args.path, "utf-8");
+          // Strip shebang — Bun compile handles it separately
+          if (original.startsWith("#!")) {
+            original = original.slice(original.indexOf("\n") + 1);
+          }
+          const preamble = [
+            ...skillImportLines,
+            `import __shimFs from "node:fs";`,
+            `import __shimPath from "node:path";`,
+            ``,
+            `// Bun compile: virtual FS overlay for embedded skills`,
+            `// $bunfs flattens files, so we create a virtual directory tree`,
+            `const __skiFileMap: Record<string, string> = Object.create(null);`,
+            ...fileMapAssignments,
+            ``,
+            `// Derive virtual root from $bunfs prefix + unique subdir`,
+            `const __bunfsPrefix = __ski0.slice(0, __ski0.lastIndexOf(__ski0.includes("\\\\") ? "\\\\" : "/"));`,
+            `const __skiSep = __ski0.includes("\\\\") ? "\\\\" : "/";`,
+            `const __skillsVRoot = __bunfsPrefix + __skiSep + "__skills__";`,
+            ``,
+            `// Directory manifest (relative paths → child entries)`,
+            `const __skiDirManifest: Record<string, { files: string[]; dirs: string[] }> = ${JSON.stringify(embeddedSkills.manifest)};`,
+            ``,
+            `// Set env var so resolveBundledSkillsDir() finds the virtual root`,
+            `process.env.OPENCLAW_BUNDLED_SKILLS_DIR = __skillsVRoot;`,
+            ``,
+            `// Resolve virtual path to its relative key (or null if not under virtual root)`,
+            `function __skiRelPath(p: string): string | null {`,
+            `  if (!p.startsWith(__skillsVRoot)) return null;`,
+            `  if (p === __skillsVRoot) return "";`,
+            `  const after = p.slice(__skillsVRoot.length);`,
+            `  if (after[0] !== "/" && after[0] !== "\\\\") return null;`,
+            `  return after.slice(1).replace(/\\\\/g, "/");`,
+            `}`,
+            ``,
+            `// Patch readdirSync`,
+            `const __origReaddirSync = __shimFs.readdirSync;`,
+            `(__shimFs as any).readdirSync = function(p: any, options?: any): any {`,
+            `  if (typeof p === "string") {`,
+            `    const rel = __skiRelPath(p);`,
+            `    if (rel !== null) {`,
+            `      const entry = __skiDirManifest[rel];`,
+            `      if (entry) {`,
+            `        if (options?.withFileTypes) {`,
+            `          const makeDirent = (name: string, isDir: boolean) => ({`,
+            `            name,`,
+            `            isDirectory: () => isDir,`,
+            `            isFile: () => !isDir,`,
+            `            isSymbolicLink: () => false,`,
+            `            isBlockDevice: () => false,`,
+            `            isCharacterDevice: () => false,`,
+            `            isFIFO: () => false,`,
+            `            isSocket: () => false,`,
+            `            parentPath: p,`,
+            `            path: p,`,
+            `          });`,
+            `          return [`,
+            `            ...entry.dirs.map((n: string) => makeDirent(n, true)),`,
+            `            ...entry.files.map((n: string) => makeDirent(n, false)),`,
+            `          ];`,
+            `        }`,
+            `        return [...entry.dirs, ...entry.files];`,
+            `      }`,
+            `    }`,
+            `  }`,
+            `  return __origReaddirSync.call(__shimFs, p, options);`,
+            `};`,
+            ``,
+            `// Patch readFileSync — redirect virtual paths to real $bunfs paths`,
+            `const __origReadFileSync = __shimFs.readFileSync;`,
+            `(__shimFs as any).readFileSync = function(p: any, options?: any): any {`,
+            `  if (typeof p === "string") {`,
+            `    const rel = __skiRelPath(p);`,
+            `    if (rel !== null && rel in __skiFileMap) {`,
+            `      return __origReadFileSync.call(__shimFs, __skiFileMap[rel]!, options);`,
+            `    }`,
+            `  }`,
+            `  return __origReadFileSync.call(__shimFs, p, options);`,
+            `};`,
+            ``,
+            `// Patch statSync/lstatSync — return fake stats for virtual paths`,
+            `function __skiMakeFakeStat(isDir: boolean, size: number) {`,
+            `  const now = new Date();`,
+            `  return {`,
+            `    dev: 0, ino: 0, mode: isDir ? 16877 : 33188, nlink: 1,`,
+            `    uid: 0, gid: 0, rdev: 0, size, blksize: 4096, blocks: Math.ceil(size / 512),`,
+            `    atimeMs: now.getTime(), mtimeMs: now.getTime(), ctimeMs: now.getTime(), birthtimeMs: now.getTime(),`,
+            `    atime: now, mtime: now, ctime: now, birthtime: now,`,
+            `    isFile: () => !isDir, isDirectory: () => isDir, isBlockDevice: () => false,`,
+            `    isCharacterDevice: () => false, isSymbolicLink: () => false, isFIFO: () => false, isSocket: () => false,`,
+            `  };`,
+            `}`,
+            `const __origStatSync = __shimFs.statSync;`,
+            `(__shimFs as any).statSync = function(p: any, options?: any): any {`,
+            `  if (typeof p === "string") {`,
+            `    const rel = __skiRelPath(p);`,
+            `    if (rel !== null) {`,
+            `      if (rel in __skiDirManifest) return __skiMakeFakeStat(true, 0);`,
+            `      if (rel in __skiFileMap) {`,
+            `        try { return __origStatSync.call(__shimFs, __skiFileMap[rel]!, options); }`,
+            `        catch { return __skiMakeFakeStat(false, 1024); }`,
+            `      }`,
+            `      const err = new Error("ENOENT: no such file, stat '" + p + "'") as any;`,
+            `      err.code = "ENOENT"; err.errno = -2; err.syscall = "stat"; err.path = p;`,
+            `      throw err;`,
+            `    }`,
+            `  }`,
+            `  return __origStatSync.call(__shimFs, p, options);`,
+            `};`,
+            `const __origLstatSync = __shimFs.lstatSync;`,
+            `(__shimFs as any).lstatSync = function(p: any, options?: any): any {`,
+            `  if (typeof p === "string") {`,
+            `    const rel = __skiRelPath(p);`,
+            `    if (rel !== null) {`,
+            `      if (rel in __skiDirManifest) return __skiMakeFakeStat(true, 0);`,
+            `      if (rel in __skiFileMap) {`,
+            `        try { return __origLstatSync.call(__shimFs, __skiFileMap[rel]!, options); }`,
+            `        catch { return __skiMakeFakeStat(false, 1024); }`,
+            `      }`,
+            `      const err = new Error("ENOENT: no such file, lstat '" + p + "'") as any;`,
+            `      err.code = "ENOENT"; err.errno = -2; err.syscall = "lstat"; err.path = p;`,
+            `      throw err;`,
+            `    }`,
+            `  }`,
+            `  return __origLstatSync.call(__shimFs, p, options);`,
+            `};`,
+            ``,
+            `// Patch existsSync — virtual dirs and files should exist`,
+            `const __origExistsSync = __shimFs.existsSync;`,
+            `(__shimFs as any).existsSync = function(p: any): boolean {`,
+            `  if (typeof p === "string") {`,
+            `    const rel = __skiRelPath(p);`,
+            `    if (rel !== null) {`,
+            `      return rel in __skiDirManifest || rel in __skiFileMap;`,
+            `    }`,
+            `  }`,
+            `  return __origExistsSync.call(__shimFs, p);`,
+            `};`,
+            ``,
+          ].join("\n");
+          return { contents: preamble + original, loader: "ts" };
+        });
+
+        console.log(
+          `[bun-compile] Plugin: skills → embedding ${embeddedSkills.files.length} files with virtual FS overlay`,
+        );
+      }
+
+      // --- pi-coding-agent skills.js: fix destructured fs imports ---
+      // Bun's bundler captures destructured imports as direct references, which
+      // bypasses monkey-patches on the fs module. Replace the destructured import
+      // with wrapper functions that access fs via property access at call time.
+      build.onLoad({ filter: /pi-coding-agent[/\\]dist[/\\]core[/\\]skills\.js$/ }, (args) => {
+        const original = readFileSync(args.path, "utf-8");
+        const patched = original.replace(
+          /import\s*\{\s*existsSync\s*,\s*readdirSync\s*,\s*readFileSync\s*,\s*realpathSync\s*,\s*statSync\s*\}\s*from\s*["']fs["'];?/,
+          [
+            `import __piFs from "fs";`,
+            `const existsSync = (p) => __piFs.existsSync(p);`,
+            `const readdirSync = (p, o) => __piFs.readdirSync(p, o);`,
+            `const readFileSync = (p, o) => __piFs.readFileSync(p, o);`,
+            `const realpathSync = (p) => __piFs.realpathSync(p);`,
+            `const statSync = (p) => __piFs.statSync(p);`,
+          ].join("\n"),
+        );
+        return { contents: patched, loader: "js" };
+      });
+
       // --- ajv: schema-validator uses createRequire + require("ajv") which
       // creates a separate require scope the bundler can't follow.
       // Add a top-level import and replace the dynamic require with it. ---
@@ -495,6 +681,52 @@ function copySidecarLibs() {
   if (copied === 0) {
     rmSync(libDir, { recursive: true, force: true });
   }
+}
+
+// ---------------------------------------------------------------------------
+// Scan skills directory for embedding into binary
+// ---------------------------------------------------------------------------
+
+type EmbeddedSkillsData = {
+  manifest: Record<string, { files: string[]; dirs: string[] }>;
+  files: { absPath: string; relPath: string }[];
+};
+
+function scanSkillsForEmbedding(): EmbeddedSkillsData {
+  const skillsDir = resolve("skills");
+  const manifest: Record<string, { files: string[]; dirs: string[] }> = {};
+  const files: { absPath: string; relPath: string }[] = [];
+
+  if (!existsSync(skillsDir)) {
+    return { manifest, files };
+  }
+
+  const scan = (dir: string, rel: string) => {
+    const entries = readdirSync(dir, { withFileTypes: true });
+    const fileNames: string[] = [];
+    const dirNames: string[] = [];
+    for (const entry of entries) {
+      if (entry.name.startsWith(".")) {
+        continue;
+      }
+      const fullPath = join(dir, entry.name);
+      const entryRel = rel ? `${rel}/${entry.name}` : entry.name;
+      if (entry.isDirectory()) {
+        dirNames.push(entry.name);
+        scan(fullPath, entryRel);
+      } else if (entry.isFile()) {
+        fileNames.push(entry.name);
+        files.push({ absPath: fullPath, relPath: entryRel });
+      }
+    }
+    manifest[rel] = { files: fileNames, dirs: dirNames };
+  };
+  scan(skillsDir, "");
+
+  console.log(
+    `[bun-compile] Scanned skills: ${files.length} files in ${Object.keys(manifest).length} directories`,
+  );
+  return { manifest, files };
 }
 
 // ---------------------------------------------------------------------------
@@ -623,7 +855,10 @@ mkdirSync(outdir, { recursive: true });
 const sdkTempDir = join(outdir, ".plugin-sdk-prebuild");
 await bundlePluginSdk(sdkTempDir);
 
-const plugin = createNativeEmbedPlugin();
+// Scan skills directory for embedding into binary
+const embeddedSkills = scanSkillsForEmbedding();
+
+const plugin = createNativeEmbedPlugin(embeddedSkills);
 const externals = buildExternals();
 const outfile = join(outdir, platform.os === "win32" ? "openclaw.exe" : "openclaw");
 
@@ -662,7 +897,13 @@ console.log("[bun-compile] Copying sidecar files...");
 
 copyFileSync("package.json", join(outdir, "package.json"));
 cpSync("extensions", join(outdir, "extensions"), { recursive: true });
-cpSync("skills", join(outdir, "skills"), { recursive: true });
+
+// Skills are embedded in the binary via $bunfs (with readdirSync shim).
+// Only copy as sidecar fallback if embedding failed (no skill files found).
+if (embeddedSkills.files.length === 0) {
+  cpSync("skills", join(outdir, "skills"), { recursive: true });
+  console.log("[bun-compile] Skills not embedded, copied as sidecar fallback.");
+}
 
 // Clean up plugin-sdk pre-build temp dir (already embedded in binary)
 rmSync(sdkTempDir, { recursive: true, force: true });
