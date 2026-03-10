@@ -248,6 +248,11 @@ jobs:
           fetch-depth: 0
           fetch-tags: true
 
+      - name: Fetch upstream tags
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          git fetch https://github.com/openclaw/openclaw.git --tags
+
       - name: Resolve release tag
         id: resolve-tag
         shell: bash
