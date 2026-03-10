@@ -155,26 +155,23 @@ jobs:
           codesign --verify --verbose dist-bun/${{ matrix.binary }}
 
       - name: Notarize binary (macOS)
-        if: matrix.os == 'darwin' && env.NOTARYTOOL_KEY != ''
+        if: matrix.os == 'darwin' && env.APPLE_ID != ''
         env:
-          NOTARYTOOL_KEY: ${{ secrets.APP_STORE_CONNECT_API_KEY_P8 }}
-          NOTARYTOOL_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
-          NOTARYTOOL_ISSUER: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_ID_PASSWORD: ${{ secrets.APPLE_ID_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           # notarytool requires a zip/dmg/pkg — zip the binary for submission
           NOTARY_ZIP=$(mktemp /tmp/notarize.XXXXXX.zip)
           ditto -c -k --keepParent dist-bun/${{ matrix.binary }} "$NOTARY_ZIP"
 
-          KEY_FILE=$(mktemp /tmp/notary-key.XXXXXX.p8)
-          echo "$NOTARYTOOL_KEY" > "$KEY_FILE"
-
           xcrun notarytool submit "$NOTARY_ZIP" \
-            --key "$KEY_FILE" \
-            --key-id "$NOTARYTOOL_KEY_ID" \
-            --issuer "$NOTARYTOOL_ISSUER" \
+            --apple-id "$APPLE_ID" \
+            --password "$APPLE_ID_PASSWORD" \
+            --team-id "$APPLE_TEAM_ID" \
             --wait
 
-          rm -f "$NOTARY_ZIP" "$KEY_FILE"
+          rm -f "$NOTARY_ZIP"
 
       - name: Cleanup keychain (macOS)
         if: matrix.os == 'darwin' && always()
