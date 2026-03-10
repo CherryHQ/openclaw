@@ -38,7 +38,6 @@ export interface PatchContext {
   sdkFiles: Array<{ fullPath: string; basename: string }>;
   sdkImportLines: string[];
   sdkMapExpr: string;
-  jitiBabelCjs: string;
   // control-ui
   controlUiFiles: Array<{ absPath: string; relPath: string }>;
   // VFS

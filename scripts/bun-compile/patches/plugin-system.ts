@@ -1,7 +1,7 @@
 /**
  * Plugin-system patchers for Bun compiled binary.
  *
- * patchLoaderTs: patches loader.ts with SDK embedding, custom createRequire, jiti config
+ * patchLoaderTs: patches loader.ts with SDK embedding, native require() for external plugins (no jiti)
  * patchManifestTs: patches manifest.ts with VFS bypass for openBoundaryFileSync
  * patchDiscoveryTs: patches discovery.ts with VFS bypass for package resolution
  */
@@ -10,11 +10,11 @@ import type { PatchContext } from "../types.js";
 // --- Preamble code blocks (injected at top of loader.ts) ---
 
 function buildSdkPreamble(
-  ctx: Pick<PatchContext, "sdkImportLines" | "sdkMapExpr" | "jitiBabelCjs">,
+  ctx: Pick<PatchContext, "sdkImportLines" | "sdkMapExpr">,
 ): string {
   return [
     `import __sdkOs from "node:os";`,
-    `import { createRequire as __bunCreateRequireForVfs } from "node:module";`,
+    `import { createRequire as __bunCreateRequire } from "node:module";`,
     // Error.captureStackTrace patch for Bun/JSC compatibility
     `{`,
     `  const __origCST = Error.captureStackTrace;`,
@@ -24,19 +24,6 @@ function buildSdkPreamble(
     `      catch { if (t && typeof t === "object") t.stack = new Error().stack; }`,
     `    };`,
     `  }`,
-    `}`,
-    // Embed jiti babel.cjs
-    `import __jitiBabelBunfs from ${JSON.stringify(ctx.jitiBabelCjs)} with { type: "file" };`,
-    `let __jitiBabelPath: string | null = null;`,
-    `function __extractJitiBabel(): string {`,
-    `  if (__jitiBabelPath) return __jitiBabelPath;`,
-    `  const tmpDir = path.join(__sdkOs.tmpdir(), "openclaw-jiti-" + process.pid);`,
-    `  fs.mkdirSync(tmpDir, { recursive: true });`,
-    `  const dest = path.join(tmpDir, "babel.cjs");`,
-    `  fs.writeFileSync(dest, fs.readFileSync(__jitiBabelBunfs));`,
-    `  __jitiBabelPath = dest;`,
-    `  process.on("exit", () => { try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {} });`,
-    `  return dest;`,
     `}`,
     // SDK extraction
     ...ctx.sdkImportLines,
@@ -52,106 +39,24 @@ function buildSdkPreamble(
     `    for (const [name, src] of Object.entries(__sdkBunfsMap)) {`,
     `      fs.writeFileSync(path.join(sdkDir, name), fs.readFileSync(src));`,
     `    }`,
+    `    // SDK was built with format: "esm", so Bun needs package.json to know module type`,
+    `    fs.writeFileSync(path.join(sdkDir, "package.json"), '{"type":"module"}');`,
     `    __sdkCacheDir = dir;`,
     `    process.on("exit", () => { try { fs.rmSync(dir, { recursive: true, force: true }); } catch {} });`,
     `  } catch {}`,
     `  return __sdkCacheDir;`,
     `}`,
-  ].join("\n");
-}
-
-// --- Custom createRequire + jiti config code block ---
-
-function buildCreateRequireBlock(): string {
-  return [
-    `// --- Bun compile: custom module resolution for external plugins ---`,
-    `    const __Module = require("module") as any;`,
-    `    const __origCreateRequire = __Module.createRequire;`,
-    `    __Module.createRequire = function __bunCreateRequire(filepath: string) {`,
-    `      const __dir = path.dirname(filepath);`,
-    `      const __realRequire = typeof require === "function" ? require : __origCreateRequire(filepath);`,
-    `      const __builtins: Set<string> = new Set(__Module.builtinModules ?? []);`,
-    `      function __resolvePackage(dir: string, spec: string): string | null {`,
-    `        const parts = spec.split("/");`,
-    `        const pkgName = spec.startsWith("@") ? parts.slice(0, 2).join("/") : parts[0]!;`,
-    `        const subpath = spec.startsWith("@") ? parts.slice(2).join("/") : parts.slice(1).join("/");`,
-    `        let cursor = dir;`,
-    `        for (let i = 0; i < 64; i++) {`,
-    `          const pkgDir = path.join(cursor, "node_modules", pkgName);`,
-    `          if (fs.existsSync(pkgDir)) {`,
-    `            if (subpath) {`,
-    `              for (const ext of ["", ".js", ".cjs", ".json", "/index.js", "/index.cjs"]) {`,
-    `                const c = path.join(pkgDir, subpath + ext);`,
-    `                if (fs.existsSync(c) && fs.statSync(c).isFile()) return c;`,
-    `              }`,
-    `            }`,
-    `            const pjPath = path.join(pkgDir, "package.json");`,
-    `            if (fs.existsSync(pjPath)) {`,
-    `              const pj = JSON.parse(fs.readFileSync(pjPath, "utf-8"));`,
-    `              if (subpath && pj.exports) {`,
-    `                const ek = "./" + subpath;`,
-    `                const ev = pj.exports[ek];`,
-    `                if (typeof ev === "string") return path.join(pkgDir, ev);`,
-    `                if (ev?.require) return path.join(pkgDir, typeof ev.require === "string" ? ev.require : ev.require.default);`,
-    `                if (ev?.default) return path.join(pkgDir, ev.default);`,
-    `              }`,
-    `              if (!subpath) {`,
-    `                const dot = pj.exports?.["."];`,
-    `                if (dot) {`,
-    `                  const m = typeof dot === "string" ? dot`,
-    `                    : dot.require ? (typeof dot.require === "string" ? dot.require : dot.require.default)`,
-    `                    : dot.default ?? dot.node ?? null;`,
-    `                  if (m) return path.join(pkgDir, m);`,
-    `                }`,
-    `                if (pj.main) return path.join(pkgDir, pj.main);`,
-    `                return path.join(pkgDir, "index.js");`,
-    `              }`,
-    `            }`,
-    `            if (!subpath) return path.join(pkgDir, "index.js");`,
-    `          }`,
-    `          const parent = path.dirname(cursor);`,
-    `          if (parent === cursor) break;`,
-    `          cursor = parent;`,
-    `        }`,
-    `        return null;`,
-    `      }`,
-    `      function __resolveFile(dir: string, rel: string): string | null {`,
-    `        for (const ext of ["", ".ts", ".tsx", ".js", ".cjs", ".mjs", ".json", "/index.ts", "/index.js"]) {`,
-    `          const abs = path.resolve(dir, rel + ext);`,
-    `          if (fs.existsSync(abs) && fs.statSync(abs).isFile()) return abs;`,
-    `        }`,
-    `        return null;`,
-    `      }`,
-    `      const customRequire: any = (id: string) => __realRequire(customRequire.resolve(id));`,
-    `      customRequire.resolve = (id: string) => {`,
-    `        if (path.isAbsolute(id)) return id;`,
-    `        if (id.startsWith(".")) {`,
-    `          const r = __resolveFile(__dir, id);`,
-    `          if (r) return r;`,
-    `          throw new Error("Cannot find module '" + id + "' from '" + filepath + "'");`,
-    `        }`,
-    `        if (id.startsWith("node:") || __builtins.has(id) || id === "module") return id;`,
-    `        const r = __resolvePackage(__dir, id);`,
-    `        if (r) return r;`,
-    `        throw new Error("Cannot find module '" + id + "' from '" + filepath + "'");`,
-    `      };`,
-    `      customRequire.cache = {};`,
-    `      customRequire.extensions = {};`,
-    `      return customRequire;`,
-    `    };`,
-  ].join("\n");
-}
-
-function buildJitiTransformBlock(): string {
-  return [
-    `      transform(opts: any) {`,
-    `        const fn = opts.filename ?? "";`,
-    `        if (fn.includes("node_modules") && (fn.endsWith(".cjs") || fn.endsWith(".js"))) {`,
-    `          return { code: opts.source };`,
-    `        }`,
-    `        const babelTransform = require(__extractJitiBabel());`,
-    `        return babelTransform(opts);`,
-    `      },`,
+    // Build SDK alias map for rewriting imports in external plugin source files.
+    // This replaces jiti's alias functionality: before loading an external plugin,
+    // we replace "openclaw/plugin-sdk" import specifiers with absolute paths to
+    // the extracted SDK files. Stored on globalThis for access from loader.ts.
+    `{`,
+    `  const __sdkRootDir = __extractPluginSdk();`,
+    `  if (__sdkRootDir) {`,
+    `    const __sdkDist = path.join(__sdkRootDir, "dist", "plugin-sdk");`,
+    `    (globalThis as any).__openclawSdkDist = __sdkDist;`,
+    `  }`,
+    `}`,
   ].join("\n");
 }
 
@@ -159,7 +64,7 @@ function buildJitiTransformBlock(): string {
 
 export function patchLoaderTs(
   source: string,
-  ctx: Pick<PatchContext, "sdkImportLines" | "sdkMapExpr" | "jitiBabelCjs" | "sdkFiles">,
+  ctx: Pick<PatchContext, "sdkImportLines" | "sdkMapExpr" | "sdkFiles">,
 ): string {
   const preamble = buildSdkPreamble(ctx);
 
@@ -206,45 +111,75 @@ export function patchLoaderTs(
         `    }`,
       ].join("\n"),
     )
-    // 4. Inject custom createRequire monkey-patch before jiti init
-    .replace(
-      /jitiLoader = createJiti\(import\.meta\.url, \{/,
-      [
-        buildCreateRequireBlock(),
-        `    jitiLoader = createJiti(import.meta.url, {`,
-        `      tryNative: false,`,
-        `      fsCache: false,`,
-      ].join("\n"),
-    )
-    // 5. Add custom transform to jiti options
-    .replace(
-      /interopDefault: true,\s*\n\s*extensions:/,
-      [
-        `interopDefault: true,`,
-        buildJitiTransformBlock(),
-        `      extensions:`,
-      ].join("\n"),
-    )
-    // 6. Bypass jiti for $bunfs extensions — evaluate CJS manually.
-    //    Pre-bundled CJS extensions don't need jiti's TypeScript/ESM transforms,
-    //    and jiti's CJS VM evaluation breaks __toESM interop (wraps builtins with
-    //    __esModule:true but omits .default as own property).
-    //    Bun's $bunfs doesn't set up CJS context (module/exports) for dynamic
-    //    require(), so we read the file and evaluate with a proper CJS wrapper.
+    // 4. Replace jiti with native loading for all plugin paths.
+    //    - $bunfs/VFS extensions: read source via VFS, evaluate with new Function() CJS wrapper
+    //      (preserves require resolution from binary context, not temp dir)
+    //    - External extensions: use Bun's native require() directly (handles TS/ESM/CJS)
+    //    No jiti needed in compiled binary — Bun runtime handles everything natively.
     .replace(
       /mod = getJiti\(\)\(safeSource\) as OpenClawPluginModule;/,
       [
         `if (safeSource.includes("$bunfs") || safeSource.includes("__extensions__")) {`,
         `        const __vfsR = (globalThis as any).__vfsResolve as ((p: string) => string | null) | undefined;`,
         `        const __realPath = __vfsR?.(safeSource) ?? safeSource;`,
-        `        const __code = fs.readFileSync(__realPath, "utf-8");`,
+        `        let __code = fs.readFileSync(__realPath, "utf-8");`,
+        `        // Bun CJS output wraps code in (function(exports,require,module,__filename,__dirname){...})`,
+        `        // Strip the wrapper so new Function() can execute the inner code directly.`,
+        `        const __bunCjsMatch = __code.match(/^[\\s\\S]*?\\(function\\s*\\(exports,\\s*require,\\s*module,\\s*__filename,\\s*__dirname\\)\\s*\\{/);`,
+        `        if (__bunCjsMatch) {`,
+        `          __code = __code.slice(__bunCjsMatch[0].length);`,
+        `          const __lastParen = __code.lastIndexOf("})");`,
+        `          if (__lastParen !== -1) __code = __code.slice(0, __lastParen);`,
+        `        }`,
         `        const __cjsModule = { exports: {} as any };`,
-        `        const __cjsRequire = __bunCreateRequireForVfs(import.meta.url);`,
+        `        const __cjsRequire = __bunCreateRequire(import.meta.url);`,
         `        const __cjsFn = new Function("module", "exports", "require", "__filename", "__dirname", __code);`,
         `        __cjsFn(__cjsModule, __cjsModule.exports, __cjsRequire, __realPath, path.dirname(__realPath));`,
         `        mod = __cjsModule.exports as OpenClawPluginModule;`,
         `      } else {`,
-        `        mod = getJiti()(safeSource) as OpenClawPluginModule;`,
+        `        // External plugins: Bun compiled binary cannot resolve node_modules from`,
+        `        // external file paths (confirmed bug). Workaround: spawn ourselves in`,
+        `        // __OPENCLAW_BUNDLE_MODE to run Bun.build() and bundle all npm deps into`,
+        `        // a single file, then post-process to rewrite openclaw/plugin-sdk paths.`,
+        `        const __sdkDist = (globalThis as any).__openclawSdkDist as string | undefined;`,
+        `        const __pluginRoot = candidate.rootDir;`,
+        `        const __tmpDir = path.join(__sdkOs.tmpdir(), "openclaw-ext-" + pluginId + "-" + process.pid);`,
+        `        try {`,
+        `          fs.mkdirSync(__tmpDir, { recursive: true });`,
+        `          const __bundleOut = path.join(__tmpDir, "bundle.js");`,
+        `          // Spawn ourselves in bundler mode — the compiled binary IS bun`,
+        `          const { spawnSync: __spawnSync } = require("node:child_process") as typeof import("node:child_process");`,
+        `          const __buildResult = __spawnSync(process.execPath, [], {`,
+        `            cwd: __pluginRoot,`,
+        `            encoding: "utf-8",`,
+        `            timeout: 30000,`,
+        `            env: Object.assign({}, process.env, {`,
+        `              ["__OPENCLAW_BUNDLE_MODE"]: "1",`,
+        `              ["__OPENCLAW_BUNDLE_ENTRY"]: safeSource,`,
+        `              ["__OPENCLAW_BUNDLE_OUTFILE"]: __bundleOut,`,
+        `              ["__OPENCLAW_BUNDLE_CWD"]: __pluginRoot,`,
+        `            }),`,
+        `          });`,
+        `          if (__buildResult.status !== 0) throw new Error("bun build failed: " + (__buildResult.stderr || "unknown error").slice(0, 500));`,
+        `          // Post-process: rewrite openclaw/plugin-sdk imports to absolute SDK paths`,
+        `          let __bundleCode = fs.readFileSync(__bundleOut, "utf-8");`,
+        `          if (__sdkDist) {`,
+        `            __bundleCode = __bundleCode.replace(`,
+        `              /(?:from\\s+|require\\s*\\(\\s*|import\\s*\\(\\s*)(["'])openclaw\\/plugin-sdk(?:\\/([^"']+))?\\1/g,`,
+        `              (m: string, q: string, subpath: string | undefined) => {`,
+        `                const target = subpath ? path.join(__sdkDist, subpath + ".js") : path.join(__sdkDist, "index.js");`,
+        `                const prefix = m.startsWith("from") ? "from " : m.startsWith("require") ? "require(" : "import(";`,
+        `                return prefix + q + target + q;`,
+        `              },`,
+        `            );`,
+        `          }`,
+        `          fs.writeFileSync(__bundleOut, __bundleCode);`,
+        `          mod = require(__bundleOut) as OpenClawPluginModule;`,
+        `          process.on("exit", () => { try { fs.rmSync(__tmpDir, { recursive: true, force: true }); } catch {} });`,
+        `        } catch (__extErr) {`,
+        `          try { fs.rmSync(__tmpDir, { recursive: true, force: true }); } catch {}`,
+        `          throw __extErr;`,
+        `        }`,
         `      }`,
       ].join("\n"),
     );
