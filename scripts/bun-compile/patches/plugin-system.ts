@@ -14,6 +14,7 @@ function buildSdkPreamble(
 ): string {
   return [
     `import __sdkOs from "node:os";`,
+    `import { createRequire as __bunCreateRequireForVfs } from "node:module";`,
     // Error.captureStackTrace patch for Bun/JSC compatibility
     `{`,
     `  const __origCST = Error.captureStackTrace;`,
@@ -163,21 +164,21 @@ export function patchLoaderTs(
   const preamble = buildSdkPreamble(ctx);
 
   const patched = source
-    // 1. Replace modulePath default from fileURLToPath to process.execPath
+    // 1. Replace modulePath default from fileURLToPath to process.execPath (both occurrences)
     .replace(
-      /const\s+modulePath\s*=\s*params\.modulePath\s*\?\?\s*fileURLToPath\(import\.meta\.url\);/,
-      `const modulePath = params.modulePath ?? process.execPath;`,
+      /fileURLToPath\(import\.meta\.url\)/g,
+      `process.execPath`,
     )
     // 2. Add extracted plugin-sdk dir as first search candidate before cursor walk
     .replace(
-      /let cursor = path\.dirname\(modulePath\);/,
+      /let cursor = path\.dirname\(params\.modulePath\);/,
       [
         `const __sdkRoot = __extractPluginSdk();`,
         `    if (__sdkRoot) {`,
         `      const __sdkDist = path.join(__sdkRoot, "dist", "plugin-sdk", params.distFile);`,
         `      if (fs.existsSync(__sdkDist)) return __sdkDist;`,
         `    }`,
-        `    let cursor = path.dirname(modulePath);`,
+        `    let cursor = path.dirname(params.modulePath);`,
       ].join("\n"),
     )
     // 3. For embedded extensions ($bunfs VFS paths), bypass openBoundaryFileSync
@@ -223,6 +224,29 @@ export function patchLoaderTs(
         buildJitiTransformBlock(),
         `      extensions:`,
       ].join("\n"),
+    )
+    // 6. Bypass jiti for $bunfs extensions — evaluate CJS manually.
+    //    Pre-bundled CJS extensions don't need jiti's TypeScript/ESM transforms,
+    //    and jiti's CJS VM evaluation breaks __toESM interop (wraps builtins with
+    //    __esModule:true but omits .default as own property).
+    //    Bun's $bunfs doesn't set up CJS context (module/exports) for dynamic
+    //    require(), so we read the file and evaluate with a proper CJS wrapper.
+    .replace(
+      /mod = getJiti\(\)\(safeSource\) as OpenClawPluginModule;/,
+      [
+        `if (safeSource.includes("$bunfs") || safeSource.includes("__extensions__")) {`,
+        `        const __vfsR = (globalThis as any).__vfsResolve as ((p: string) => string | null) | undefined;`,
+        `        const __realPath = __vfsR?.(safeSource) ?? safeSource;`,
+        `        const __code = fs.readFileSync(__realPath, "utf-8");`,
+        `        const __cjsModule = { exports: {} as any };`,
+        `        const __cjsRequire = __bunCreateRequireForVfs(import.meta.url);`,
+        `        const __cjsFn = new Function("module", "exports", "require", "__filename", "__dirname", __code);`,
+        `        __cjsFn(__cjsModule, __cjsModule.exports, __cjsRequire, __realPath, path.dirname(__realPath));`,
+        `        mod = __cjsModule.exports as OpenClawPluginModule;`,
+        `      } else {`,
+        `        mod = getJiti()(safeSource) as OpenClawPluginModule;`,
+        `      }`,
+      ].join("\n"),
     );
 
   return preamble + "\n" + patched;
@@ -238,7 +262,9 @@ export function patchManifestTs(source: string): string {
       `): PluginManifestLoadResult {`,
       `  const __vfsResolve = (globalThis as any).__vfsResolve as ((p: string) => string | null) | undefined;`,
       `  const manifestPath = resolvePluginManifestPath(rootDir);`,
+      `  if (process.env.OPENCLAW_VFS_DEBUG) console.error("[VFS:loadPluginManifest]", { rootDir, manifestPath, hasVfsResolve: !!__vfsResolve, resolved: __vfsResolve?.(manifestPath) ?? "N/A" });`,
       `  if (__vfsResolve?.(manifestPath)) {`,
+      `    if (process.env.OPENCLAW_VFS_DEBUG) console.error("[VFS:loadPluginManifest:BYPASS]", manifestPath);`,
       `    try {`,
       `      const raw = JSON.parse(fs.readFileSync(manifestPath, "utf-8")) as unknown;`,
       `      if (!isRecord(raw)) return { ok: false, error: "plugin manifest must be an object", manifestPath };`,
@@ -263,9 +289,11 @@ export function patchManifestTs(source: string): string {
       `        manifestPath,`,
       `      };`,
       `    } catch (err) {`,
+      `      if (process.env.OPENCLAW_VFS_DEBUG) console.error("[VFS:loadPluginManifest:ERROR]", manifestPath, String(err));`,
       `      return { ok: false, error: "failed to parse plugin manifest: " + String(err), manifestPath };`,
       `    }`,
       `  }`,
+      `  if (process.env.OPENCLAW_VFS_DEBUG) console.error("[VFS:loadPluginManifest:FALLTHROUGH]", rootDir, new Error().stack?.split("\\n").slice(0,5).join("\\n"));`,
     ].join("\n"),
   );
 }

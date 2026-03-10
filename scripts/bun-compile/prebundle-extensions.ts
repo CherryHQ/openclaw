@@ -8,6 +8,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { join, resolve } from "node:path";
+import esbuild from "esbuild";
 import { buildExternals } from "./externals.js";
 import type { TargetPlatform } from "./types.js";
 
@@ -82,39 +83,46 @@ export async function bundleExtensions(
     const outDir = join(extTempDir, ext.name);
     mkdirSync(outDir, { recursive: true });
 
-    const bundleResult = await Bun.build({
-      entrypoints: [ext.entry],
-      outdir: outDir,
-      target: "node",
-      format: "cjs",
-      minify: true,
-      external: extExternals,
-    });
+    try {
+      // Use esbuild for clean CJS output — no .default interop bugs,
+      // no import.meta in CJS, compatible with jiti's CJS VM evaluation.
+      const bundleResult = await esbuild.build({
+        entryPoints: [ext.entry],
+        outdir: outDir,
+        bundle: true,
+        platform: "node",
+        format: "cjs",
+        minify: true,
+        external: extExternals,
+        logLevel: "warning",
+        loader: { ".node": "copy" },
+        // esbuild empties import.meta in CJS — shim with __filename-based URL
+        banner: {
+          js: 'var __import_meta_url = typeof __filename !== "undefined" ? require("url").pathToFileURL(__filename).href : "file:///bundled-extension";',
+        },
+        define: {
+          "import.meta.url": "__import_meta_url",
+          "import.meta.resolve": "require.resolve",
+        },
+      });
 
-    if (!bundleResult.success) {
-      console.warn(`[bun-compile] Extension ${ext.name}: bundle failed`);
-      for (const log of bundleResult.logs) {
-        console.warn(`  ${log.message || log}`);
+      if (bundleResult.errors.length > 0) {
+        console.warn(`[bun-compile] Extension ${ext.name}: bundle failed`);
+        for (const err of bundleResult.errors) {
+          console.warn(`  ${err.text}`);
+        }
+        failures.push(ext.name);
+        cpSync(ext.dir, outDir, { recursive: true });
+        continue;
       }
+    } catch (err) {
+      console.warn(`[bun-compile] Extension ${ext.name}: bundle failed: ${String(err)}`);
       failures.push(ext.name);
       cpSync(ext.dir, outDir, { recursive: true });
       continue;
     }
 
-    const entryOutput = bundleResult.outputs.find((o) => o.kind === "entry-point");
-    const entryJsName = entryOutput ? entryOutput.path.split("/").pop()! : "index.js";
-
-    // Fix Bun CJS bundler bug: default imports generate `x.default.prop`
-    const entryJsPath = join(outDir, entryJsName);
-    if (existsSync(entryJsPath)) {
-      const code = readFileSync(entryJsPath, "utf-8");
-      const patched = code
-        .replace(/\b(?!exports)(\w+)\.default\./g, "$1.")
-        .replace(/\b(?!exports)(\w+)\.default\b/g, "$1");
-      if (patched !== code) {
-        writeFileSync(entryJsPath, patched);
-      }
-    }
+    const entryJsName = "index.js";
 
     // Copy package.json (with openclaw.extensions pointing to bundled .js)
     if (existsSync(join(ext.dir, "package.json"))) {

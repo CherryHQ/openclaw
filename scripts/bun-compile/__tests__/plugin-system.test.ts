@@ -63,6 +63,22 @@ describe("patchLoaderTs", () => {
     expect(result).toContain("Error.captureStackTrace");
     expect(result).toContain("__origCST");
   });
+
+  it("bypasses jiti for $bunfs extensions with manual CJS evaluation", () => {
+    const source = readFileSync(resolve("src/plugins/loader.ts"), "utf-8");
+    const result = patchLoaderTs(source, minimalCtx);
+    // Should detect $bunfs / __extensions__ paths
+    expect(result).toContain('includes("$bunfs")');
+    expect(result).toContain('includes("__extensions__")');
+    expect(result).toContain("__vfsResolve");
+    // Should read code and evaluate with CJS wrapper
+    expect(result).toContain("readFileSync(__realPath");
+    expect(result).toContain("__cjsModule");
+    expect(result).toContain("new Function");
+    expect(result).toContain("__bunCreateRequireForVfs");
+    // Should still use jiti for non-$bunfs paths
+    expect(result).toContain("getJiti()(safeSource)");
+  });
 });
 
 describe("patchManifestTs", () => {

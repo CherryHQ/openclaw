@@ -10,7 +10,7 @@ import type { PatchContext } from "../types.js";
 // Build the complete VFS preamble for entry.ts
 export function patchEntryTs(
   source: string,
-  ctx: Pick<PatchContext, "pkgJson" | "embeddedSkills" | "embeddedExtensions">,
+  ctx: Pick<PatchContext, "pkgJson" | "embeddedSkills" | "embeddedExtensions" | "embeddedTemplates">,
   vecFile: string | null,
 ): string {
   // Strip shebang
@@ -19,9 +19,10 @@ export function patchEntryTs(
     src = src.slice(src.indexOf("\n") + 1);
   }
 
-  const { embeddedSkills, embeddedExtensions } = ctx;
+  const { embeddedSkills, embeddedExtensions, embeddedTemplates } = ctx;
   const hasSkills = embeddedSkills.files.length > 0;
   const hasExtensions = embeddedExtensions.files.length > 0;
+  const hasTemplates = embeddedTemplates.files.length > 0;
 
   // Generate import lines
   const skillImportLines = hasSkills
@@ -44,6 +45,16 @@ export function patchEntryTs(
         (f, i) => `  __extFileMap[${JSON.stringify(f.relPath)}] = __ext${i};`,
       )
     : [];
+  const tplImportLines = hasTemplates
+    ? embeddedTemplates.files.map(
+        (f, i) => `import __tpl${i} from ${JSON.stringify(f.absPath)} with { type: "file" };`,
+      )
+    : [];
+  const tplFileMapAssignments = hasTemplates
+    ? embeddedTemplates.files.map(
+        (f, i) => `  __tplFileMap[${JSON.stringify(f.relPath)}] = __tpl${i};`,
+      )
+    : [];
 
   const vec0ImportLine = vecFile
     ? `import __vec0Path from ${JSON.stringify(vecFile)} with { type: "file" };`
@@ -52,6 +63,7 @@ export function patchEntryTs(
   const lines: string[] = [
     ...skillImportLines,
     ...extImportLines,
+    ...tplImportLines,
     ...(vec0ImportLine ? [vec0ImportLine] : []),
     `import __shimFs from "node:fs";`,
     `import __shimPath from "node:path";`,
@@ -101,6 +113,17 @@ export function patchEntryTs(
       anchorImport: "__ext0",
     });
   }
+  if (hasTemplates) {
+    vfsEntries.push({
+      tag: "__templates__",
+      envVar: "OPENCLAW_BUNDLED_TEMPLATES_DIR",
+      fileMapVar: "__tplFileMap",
+      dirManifestVar: "__tplDirManifest",
+      manifest: embeddedTemplates.manifest,
+      fileMapAssignments: tplFileMapAssignments,
+      anchorImport: "__tpl0",
+    });
+  }
 
   if (vfsEntries.length === 0) {
     return lines.join("\n") + "\n" + src;
@@ -131,6 +154,31 @@ export function patchEntryTs(
 
   // VFS lookup + all fs monkey-patches
   lines.push(...buildVfsMonkeyPatches());
+
+  // Suppress $bunfs plugin manifest errors for virtual paths.
+  // Bun's bundler inlines ~24 copies of loadPluginManifest; only the onLoad-patched
+  // copy has the VFS bypass. The inlined copies hit "unsafe plugin manifest path" or
+  // "plugin manifest not found" for virtual paths. These are non-fatal (plugins still
+  // load via the patched copy), but they clutter stderr. Filter at the output level.
+  lines.push(
+    `{`,
+    `  function __isBunfsManifestError(s: string): boolean {`,
+    `    return (s.includes("unsafe plugin manifest path") || s.includes("plugin manifest not found")) && (s.includes("$bunfs") || s.includes("__extensions__"));`,
+    `  }`,
+    `  const __origConsoleError = console.error.bind(console);`,
+    `  (console as any).error = function(...args: any[]): void {`,
+    `    const first = args[0];`,
+    `    if (typeof first === "string" && (__isBunfsManifestError(first) || (first.includes("Invalid config") && args.some((a: any) => typeof a === "string" && __isBunfsManifestError(a))))) return;`,
+    `    __origConsoleError(...args);`,
+    `  };`,
+    `  const __origStderrWrite = process.stderr.write.bind(process.stderr);`,
+    `  (process.stderr as any).write = function(chunk: any, ...args: any[]): boolean {`,
+    `    if (typeof chunk === "string" && (__isBunfsManifestError(chunk) || (chunk.includes("Invalid config") && chunk.includes("$bunfs")))) return true;`,
+    `    return __origStderrWrite(chunk, ...args);`,
+    `  };`,
+    `}`,
+    ``,
+  );
 
   if (vec0ImportLine) {
     lines.push(
@@ -276,31 +324,36 @@ function buildVfsMonkeyPatches(): string[] {
     `  return null;`,
     `};`,
     ``,
+    `const __origAccess = __shimFs.promises.access;`,
+    `(__shimFs.promises as any).access = async function(p: any, mode?: any): Promise<void> {`,
+    `  if (typeof p === "string") {`,
+    `    const hit = __vfsLookup(p);`,
+    `    if (hit && (hit.rel in hit.dirManifest || hit.rel in hit.fileMap)) return;`,
+    `  }`,
+    `  return __origAccess.call(__shimFs.promises, p, mode);`,
+    `};`,
+    ``,
+    `const __origReadFile = __shimFs.promises.readFile;`,
+    `(__shimFs.promises as any).readFile = async function(p: any, options?: any): Promise<any> {`,
+    `  if (typeof p === "string") {`,
+    `    const hit = __vfsLookup(p);`,
+    `    if (hit && hit.rel in hit.fileMap) {`,
+    `      return __origReadFile.call(__shimFs.promises, hit.fileMap[hit.rel]!, options);`,
+    `    }`,
+    `  }`,
+    `  return __origReadFile.call(__shimFs.promises, p, options);`,
+    `};`,
+    ``,
     `const __origOpenSync = __shimFs.openSync;`,
-    `const __vfsFdMap = new Map<number, string>();`,
     `(__shimFs as any).openSync = function(p: any, flags?: any, mode?: any): any {`,
     `  if (typeof p === "string") {`,
     `    const hit = __vfsLookup(p);`,
     `    if (hit && hit.rel in hit.fileMap) {`,
-    `      const __realBunfsPath = hit.fileMap[hit.rel]!;`,
-    `      const content = __origReadFileSync.call(__shimFs, __realBunfsPath);`,
-    `      const tmpPath = require("node:os").tmpdir() + "/__vfs_" + Math.random().toString(36).slice(2) + ".tmp";`,
-    `      __shimFs.writeFileSync(tmpPath, content);`,
-    `      const fd = __origOpenSync.call(__shimFs, tmpPath, flags ?? 0, mode);`,
-    `      __vfsFdMap.set(fd, tmpPath);`,
-    `      return fd;`,
+    `      // $bunfs is read-only; strip O_NOFOLLOW and other flags that $bunfs doesn't support`,
+    `      return __origOpenSync.call(__shimFs, hit.fileMap[hit.rel]!, __shimFs.constants.O_RDONLY, mode);`,
     `    }`,
     `  }`,
     `  return __origOpenSync.call(__shimFs, p, flags, mode);`,
-    `};`,
-    `const __origCloseSync = __shimFs.closeSync;`,
-    `(__shimFs as any).closeSync = function(fd: any): void {`,
-    `  __origCloseSync.call(__shimFs, fd);`,
-    `  const tmpPath = __vfsFdMap.get(fd);`,
-    `  if (tmpPath) {`,
-    `    __vfsFdMap.delete(fd);`,
-    `    try { __shimFs.unlinkSync(tmpPath); } catch {}`,
-    `  }`,
     `};`,
     ``,
   ];

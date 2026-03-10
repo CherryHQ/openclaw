@@ -56,6 +56,7 @@ import { bundleExtensions } from "./bun-compile/prebundle-extensions.js";
 import { bundlePluginSdk } from "./bun-compile/prebundle-sdk.js";
 import { scanExtensionsForEmbedding } from "./bun-compile/scan-extensions.js";
 import { scanSkillsForEmbedding } from "./bun-compile/scan-skills.js";
+import { scanTemplatesForEmbedding } from "./bun-compile/scan-templates.js";
 import { copySidecarLibs } from "./bun-compile/sidecar.js";
 import type { PatchContext } from "./bun-compile/types.js";
 
@@ -260,6 +261,43 @@ export async function readPackageName(_root) { return ${JSON.stringify(ctx.pkgJs
         contents: patchManifestTs(readFileSync(args.path, "utf-8")),
         loader: "ts",
       }));
+      // Patch openBoundaryFileSync to handle $bunfs virtual paths.
+      // Boundary validation (symlinks, hardlinks, TOCTOU identity) doesn't
+      // apply to virtual filesystem paths and fails because VFS openSync
+      // creates temp files whose fstat doesn't match the VFS lstat.
+      build.onLoad({ filter: /infra[/\\]boundary-file-read\.ts$/ }, (args) => {
+        let src = readFileSync(args.path, "utf-8");
+        src = src.replace(
+          /export function openBoundaryFileSync\(params: OpenBoundaryFileSyncParams\): BoundaryFileOpenResult \{/,
+          [
+            `export function openBoundaryFileSync(params: OpenBoundaryFileSyncParams): BoundaryFileOpenResult {`,
+            `  if (typeof params.absolutePath === "string" && (params.absolutePath.includes("$bunfs") || params.absolutePath.includes("B:\\\\~BUN"))) {`,
+            `    const ioFs = params.ioFs ?? fs;`,
+            `    try {`,
+            `      const fd = ioFs.openSync(params.absolutePath, ioFs.constants.O_RDONLY);`,
+            `      const stat = ioFs.fstatSync(fd);`,
+            `      return { ok: true, path: params.absolutePath, fd, stat, rootRealPath: params.rootPath };`,
+            `    } catch {`,
+            `      return { ok: false, reason: "io" };`,
+            `    }`,
+            `  }`,
+          ].join("\n"),
+        );
+        return { contents: src, loader: "ts" };
+      });
+      // Patch workspace-templates to prefer VFS-embedded templates directory
+      build.onLoad({ filter: /agents[/\\]workspace-templates\.ts$/ }, (args) => {
+        let src = readFileSync(args.path, "utf-8");
+        src = src.replace(
+          /const candidates = \[/,
+          [
+            `const bundledDir = process.env.OPENCLAW_BUNDLED_TEMPLATES_DIR;`,
+            `if (bundledDir) { cachedTemplateDir = bundledDir; return bundledDir; }`,
+            `const candidates = [`,
+          ].join("\n"),
+        );
+        return { contents: src, loader: "ts" };
+      });
       build.onLoad({ filter: /plugins[/\\]discovery\.ts$/ }, (args) => ({
         contents: patchDiscoveryTs(readFileSync(args.path, "utf-8")),
         loader: "ts",
@@ -276,7 +314,11 @@ export async function readPackageName(_root) { return ${JSON.stringify(ctx.pkgJs
       }));
 
       // --- VFS overlay (entry.ts) ---
-      if (ctx.embeddedSkills.files.length > 0 || ctx.embeddedExtensions.files.length > 0) {
+      if (
+        ctx.embeddedSkills.files.length > 0 ||
+        ctx.embeddedExtensions.files.length > 0 ||
+        ctx.embeddedTemplates.files.length > 0
+      ) {
         build.onLoad({ filter: /[/\\]entry\.ts$/ }, (args) => ({
           contents: patchEntryTs(readFileSync(args.path, "utf-8"), ctx, ctx.vecFile),
           loader: "ts",
@@ -290,6 +332,11 @@ export async function readPackageName(_root) { return ${JSON.stringify(ctx.pkgJs
         if (ctx.embeddedExtensions.files.length > 0) {
           console.log(
             `[bun-compile] Plugin: extensions → embedding ${ctx.embeddedExtensions.files.length} files with virtual FS overlay`,
+          );
+        }
+        if (ctx.embeddedTemplates.files.length > 0) {
+          console.log(
+            `[bun-compile] Plugin: templates → embedding ${ctx.embeddedTemplates.files.length} files with virtual FS overlay`,
           );
         }
       }
@@ -328,6 +375,9 @@ const embeddedSkills = scanSkillsForEmbedding();
 
 // Scan pre-bundled extensions for embedding
 const embeddedExtensions = scanExtensionsForEmbedding(extTempDir);
+
+// Scan workspace templates for embedding
+const embeddedTemplates = scanTemplatesForEmbedding();
 
 // --- Resolve native module paths ---
 const embedNative = !values["skip-native"] && !platform.isCross;
@@ -405,6 +455,7 @@ const ctx: PatchContext = {
   controlUiFiles,
   embeddedSkills,
   embeddedExtensions,
+  embeddedTemplates,
 };
 
 const plugin = createNativeEmbedPlugin(ctx);
@@ -454,17 +505,16 @@ if (embeddedSkills.files.length === 0) {
   console.log("[bun-compile] Skills not embedded, copied as sidecar fallback.");
 }
 
-// Copy workspace templates (docs/reference/templates/) — needed at runtime by
-// resolveWorkspaceTemplateDir() which looks for docs/reference/templates relative
-// to the package root (= dirname(process.execPath) in compiled binary).
-const templatesDir = resolve("docs/reference/templates");
-if (existsSync(templatesDir)) {
-  cpSync(templatesDir, join(outdir, "docs", "reference", "templates"), { recursive: true });
-  console.log("[bun-compile] Copied docs/reference/templates/ as sidecar.");
-} else {
-  console.warn(
-    "[bun-compile] Warning: docs/reference/templates not found. Workspace templates will be unavailable.",
-  );
+if (embeddedTemplates.files.length === 0) {
+  const templatesDir = resolve("docs/reference/templates");
+  if (existsSync(templatesDir)) {
+    cpSync(templatesDir, join(outdir, "docs", "reference", "templates"), { recursive: true });
+    console.log("[bun-compile] Templates not embedded, copied as sidecar fallback.");
+  } else {
+    console.warn(
+      "[bun-compile] Warning: docs/reference/templates not found. Workspace templates will be unavailable.",
+    );
+  }
 }
 
 // Clean up pre-build temp dirs (already embedded in binary)
