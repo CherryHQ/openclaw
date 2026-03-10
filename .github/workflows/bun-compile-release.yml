@@ -134,7 +134,7 @@ jobs:
           MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
         run: |
           CERT_FILE=$(mktemp /tmp/cert-${{ matrix.arch }}-XXXXXX.p12)
-          KEYCHAIN_FILE=$(mktemp /tmp/keychain-${{ matrix.arch }}-XXXXXX.keychain-db)
+          KEYCHAIN_FILE=$(mktemp -u /tmp/keychain-${{ matrix.arch }}-XXXXXX.keychain-db)
           KEYCHAIN_PASSWORD=$(openssl rand -hex 16)
 
           echo "$MACOS_CERTIFICATE_BASE64" | base64 --decode > "$CERT_FILE"
