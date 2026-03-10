@@ -3,10 +3,10 @@ name: Bun Compile Release
 on:
   workflow_dispatch:
     inputs:
-      tag:
-        description: "Release tag (e.g. v2026.3.7). Leave empty to skip release."
-        type: string
-        default: ""
+      create-release:
+        description: Create a GitHub release with the latest tag
+        type: boolean
+        default: true
       skip-smoke:
         description: Skip smoke tests after build
         type: boolean
@@ -236,9 +236,28 @@ jobs:
   # --- Create GitHub Release on tag push ---
   release:
     needs: build
-    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.tag != '')
+    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.create-release)
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout (for tag lookup)
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Resolve release tag
+        id: resolve-tag
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG=$(git describe --tags --abbrev=0 --match 'v*')
+          else
+            TAG="${{ github.ref_name }}"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Release tag: $TAG"
+
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
@@ -254,7 +273,7 @@ jobs:
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ inputs.tag || github.ref_name }}
+          tag_name: ${{ steps.resolve-tag.outputs.tag }}
           files: release-assets/*
           generate_release_notes: true
           draft: false
