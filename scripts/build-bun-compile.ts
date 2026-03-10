@@ -454,6 +454,19 @@ if (embeddedSkills.files.length === 0) {
   console.log("[bun-compile] Skills not embedded, copied as sidecar fallback.");
 }
 
+// Copy workspace templates (docs/reference/templates/) — needed at runtime by
+// resolveWorkspaceTemplateDir() which looks for docs/reference/templates relative
+// to the package root (= dirname(process.execPath) in compiled binary).
+const templatesDir = resolve("docs/reference/templates");
+if (existsSync(templatesDir)) {
+  cpSync(templatesDir, join(outdir, "docs", "reference", "templates"), { recursive: true });
+  console.log("[bun-compile] Copied docs/reference/templates/ as sidecar.");
+} else {
+  console.warn(
+    "[bun-compile] Warning: docs/reference/templates not found. Workspace templates will be unavailable.",
+  );
+}
+
 // Clean up pre-build temp dirs (already embedded in binary)
 rmSync(sdkTempDir, { recursive: true, force: true });
 rmSync(extTempDir, { recursive: true, force: true });
