@@ -233,7 +233,7 @@ jobs:
         run: |
           Compress-Archive -Path dist-bun\* -DestinationPath ${{ matrix.artifact }}.zip
 
-      # --- Upload ---
+      # --- Upload artifact ---
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
@@ -243,25 +243,14 @@ jobs:
             ${{ matrix.artifact }}.zip
           retention-days: 7
 
-  # --- Create GitHub Release on tag push ---
-  release:
-    needs: build
-    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.create-release)
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout (for tag lookup)
-        if: github.event_name == 'workflow_dispatch'
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          fetch-tags: true
-
-      - name: Fetch upstream tags
-        if: github.event_name == 'workflow_dispatch'
+      # --- Release (per build, immediately after success) ---
+      - name: Fetch upstream tags (for tag lookup)
+        if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.create-release)
         run: |
-          git fetch https://github.com/openclaw/openclaw.git --tags
+          git fetch https://github.com/openclaw/openclaw.git --tags 2>/dev/null || true
 
       - name: Resolve release tag
+        if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.create-release)
         id: resolve-tag
         shell: bash
         run: |
@@ -273,23 +262,14 @@ jobs:
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "Release tag: $TAG"
 
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: artifacts/
-          merge-multiple: false
-
-      - name: Collect release assets
-        run: |
-          mkdir -p release-assets
-          find artifacts -type f \( -name '*.tar.gz' -o -name '*.zip' \) -exec cp {} release-assets/ \;
-          ls -lh release-assets/
-
-      - name: Create Release
+      - name: Upload to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.create-release)
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.resolve-tag.outputs.tag }}
-          files: release-assets/*
+          files: |
+            ${{ matrix.artifact }}.tar.gz
+            ${{ matrix.artifact }}.zip
           generate_release_notes: true
           draft: false
         env:
