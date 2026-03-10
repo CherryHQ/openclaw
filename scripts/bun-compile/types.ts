@@ -19,6 +19,11 @@ export interface EmbeddedExtensionsData {
   manifest: Record<string, { files: string[]; dirs: string[] }>;
 }
 
+export interface EmbeddedTemplatesData {
+  files: EmbeddedFileEntry[];
+  manifest: Record<string, { files: string[]; dirs: string[] }>;
+}
+
 export interface PatchContext {
   platform: TargetPlatform;
   pkgJson: { name: string; version: string };
@@ -39,4 +44,5 @@ export interface PatchContext {
   // VFS
   embeddedSkills: EmbeddedSkillsData;
   embeddedExtensions: EmbeddedExtensionsData;
+  embeddedTemplates: EmbeddedTemplatesData;
 }
