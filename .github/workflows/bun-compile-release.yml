@@ -104,10 +104,14 @@ jobs:
           bun -v
 
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile --ignore-scripts=false --config.engine-strict=false --config.enable-pre-post-scripts=true
-        env:
-          npm_config_cpu: ${{ matrix.arch }}
-          npm_config_os: ${{ matrix.os == 'win32' && 'win32' || matrix.os }}
+        run: |
+          pnpm install --frozen-lockfile --ignore-scripts=false --config.engine-strict=false --config.enable-pre-post-scripts=true
+          # For cross-compile jobs, also fetch target-arch optional native deps
+          if [ "${{ matrix.cross }}" = "true" ] || [ "${{ matrix.skip-smoke }}" = "true" ]; then
+            pnpm install --frozen-lockfile --config.engine-strict=false \
+              --config.supportedArchitectures.cpu='["current","${{ matrix.arch }}"]' \
+              --config.supportedArchitectures.os='["current","${{ matrix.os }}"]'
+          fi
 
       # --- Pre-build assets ---
       - name: Build Control UI
