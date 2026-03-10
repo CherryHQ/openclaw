@@ -37,7 +37,7 @@ jobs:
             target: bun-darwin-x64
             artifact: openclaw-darwin-x64
             binary: openclaw
-            cross: true
+            skip-smoke: true
 
           # Linux
           - os: linux
@@ -105,6 +105,9 @@ jobs:
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile --ignore-scripts=false --config.engine-strict=false --config.enable-pre-post-scripts=true
+        env:
+          npm_config_cpu: ${{ matrix.arch }}
+          npm_config_os: ${{ matrix.os == 'win32' && 'win32' || matrix.os }}
 
       # --- Pre-build assets ---
       - name: Build Control UI
@@ -183,7 +186,7 @@ jobs:
 
       # --- Smoke test (native builds only) ---
       - name: Smoke test
-        if: matrix.cross != true && inputs.skip-smoke != true
+        if: matrix.cross != true && matrix.skip-smoke != true && inputs.skip-smoke != true
         run: |
           ./dist-bun/${{ matrix.binary }} --version
         timeout-minutes: 1
