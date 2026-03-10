@@ -63,7 +63,7 @@ jobs:
             binary: openclaw.exe
           - os: win32
             arch: arm64
-            runner: [self-hosted, windows-arm64]
+            runner: windows-arm64
             target: bun-windows-arm64
             artifact: openclaw-windows-arm64
             binary: openclaw.exe
