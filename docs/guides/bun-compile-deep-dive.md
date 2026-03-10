@@ -66,7 +66,7 @@ output. When `compile` is set, it produces a standalone executable.
 
 ## Bun Compile: How It Works
 
-`Bun.build({ compile: true })` produces a standalone binary that embeds:
+`Bun.build({ compile: { outfile: "./binary" } })` produces a standalone binary that embeds:
 
 1. **The Bun runtime** itself (JavaScript engine, standard library, Node.js compat layer)
 2. **Your bundled application code** (all resolved imports merged into one or more chunks)
@@ -247,21 +247,28 @@ Patched methods: `readdirSync`, `readFileSync`, `existsSync`, `statSync`, `lstat
 
 ### Why Monkey-Patching Instead of a Virtual Module?
 
-A critical Bun bundler behavior: **destructured imports capture direct references**.
+A critical Bun bundler behavior: **named imports get scope-hoisted into direct bindings**.
+
+When the bundler processes `import { existsSync } from "fs"`, it performs scope hoisting
+and resolves the named import to a direct reference to the function (e.g. an internal
+`$existsSync` binding). This eliminates the property lookup on the module object entirely,
+so any runtime mutation of `fs.existsSync` has no effect on code that imported the
+destructured name.
 
 ```typescript
-// This captures a direct reference to the ORIGINAL existsSync at bundle time
+// Bundler resolves this to a direct binding — bypasses the module object entirely
 import { existsSync } from "fs";
-existsSync("/some/path"); // Bypasses our monkey-patch!
+existsSync("/some/path"); // Calls the original, not our monkey-patch
 
-// This goes through the module object, so our patch works
+// This retains the property lookup at runtime, so our patch intercepts it
 import fs from "fs";
 fs.existsSync("/some/path"); // Uses our patched version
 ```
 
 The monkey-patch approach works because most of OpenClaw's code uses `import fs from "fs"`
-style imports. But some third-party dependencies use destructured imports, which bypass
-the patch. This is an inherent limitation.
+style imports (default import with property access). But some third-party dependencies use
+named imports, which the bundler optimizes into direct bindings that bypass the module
+object. This is an inherent limitation of the monkey-patching strategy.
 
 ---
 
@@ -342,7 +349,7 @@ npm dependencies. The compiled binary must:
 
 ## Approach 4: jiti as a Plugin Loader
 
-[jiti](https://github.com/nicolo-ribaudo/jiti) is a runtime TypeScript/ESM loader that
+[jiti](https://github.com/unjs/jiti) is a runtime TypeScript/ESM loader that
 OpenClaw already used in development. It creates a custom `require` function per file with:
 
 - **Alias mapping**: `openclaw/plugin-sdk` -> absolute path to SDK files
@@ -438,7 +445,11 @@ req.resolve("dingtalk-stream");
 `"bun"` export condition, like `axios`) but fails for others (like `dingtalk-stream`,
 `form-data`). This ruled out the "resolve each bare specifier individually" approach.
 
-This is a confirmed Bun bug in compiled binaries.
+This behavior was reproducibly verified with standalone test binaries (see
+`/tmp/bun-resolve-test/entry*.ts` in the development notes). As of Bun 1.3.x, no
+upstream issue has been filed for this specific behavior. It may be an intentional
+limitation of compiled binaries rather than a bug, but it contradicts the documented
+behavior of `createRequire` which is supposed to resolve relative to the given path.
 
 ---
 
@@ -574,7 +585,11 @@ const buildResult = spawnSync(process.execPath, [], {
 1. **Bracket notation for env vars**: `process.env["__OPENCLAW_BUNDLE_MODE"]` instead of
    `process.env.__OPENCLAW_BUNDLE_MODE`. Bun's minifier inlines `process.env.X` with the
    build-time value (undefined), dead-code-eliminating the entire check. Bracket notation
-   prevents this optimization.
+   (computed property access) prevents this optimization in current Bun versions. Note that
+   this is an **implementation-dependent behavior**, not a language-level guarantee -- if
+   Bun's minifier becomes more aggressive in the future (e.g. constant-folding computed
+   property accesses with string literals), this workaround could break. Monitor across Bun
+   upgrades.
 
 2. **Manual file writing**: `Bun.build()` with `outfile` doesn't write files in compiled
    binaries. The workaround is to get the output text via `result.outputs[0].text()` and
@@ -582,8 +597,13 @@ const buildResult = spawnSync(process.execPath, [], {
 
 3. **Top-level await**: The `await Bun.build()` call uses ESM top-level await. This works
    because `process.exit(0)` terminates the process before any subsequent code (VFS setup,
-   app initialization) executes. The ESM imports at the top of the file do get evaluated
-   (they're hoisted), but they're just module bindings with no significant side effects.
+   app initialization) executes. Note that ESM imports at the top of the file are evaluated
+   before the module body runs (they're hoisted per spec). In the current codebase, these
+   imports are primarily module bindings without significant side effects. However, this is
+   a **fragile assumption** -- if any imported module (or its transitive dependencies)
+   introduces side effects (global state registration, file I/O, network requests), those
+   would execute before the bundler mode check. This constraint must be monitored as the
+   codebase evolves.
 
 4. **`process.chdir(cwd)`**: Ensures `Bun.build()` resolves the plugin's `node_modules`
    from the correct directory.
@@ -600,7 +620,9 @@ When `minify: true`, `process.env.SOME_VAR` gets replaced with the build-time va
 If the variable isn't set during build, the access becomes `undefined` and the code
 may be dead-code eliminated.
 
-**Fix**: Use `process.env["SOME_VAR"]` (bracket notation) to prevent inlining.
+**Fix**: Use `process.env["SOME_VAR"]` (bracket notation) to prevent inlining. This is
+implementation-dependent -- it works because Bun's current minifier does not constant-fold
+computed property accesses, but this could change in future versions.
 
 ### 2. CJS .default Interop
 
@@ -616,12 +638,14 @@ matching the source tree. Some entries get renamed to chunk-style names.
 
 **Fix**: Set `root: resolve("src/plugin-sdk")` to flatten entries.
 
-### 4. Destructured fs Imports Bypass Monkey-Patches
+### 4. Named fs Imports Bypass Monkey-Patches
 
-`import { existsSync } from "fs"` captures a direct reference at bundle time,
-bypassing runtime monkey-patches on the `fs` module object.
+`import { existsSync } from "fs"` gets scope-hoisted by the bundler into a direct binding,
+eliminating the property lookup on the `fs` module object. Runtime monkey-patches on the
+module object have no effect on these direct bindings.
 
-**Fix**: Ensure code uses `fs.existsSync()` (property access) not destructured imports.
+**Fix**: Ensure code uses `fs.existsSync()` (property access on default import) not named
+imports.
 
 ### 5. $bunfs outfile Doesn't Write
 
@@ -638,8 +662,10 @@ but doesn't actually write the file.
 
 ### 7. createRequire Resolution in Compiled Binaries
 
-`createRequire(externalPath)` does not resolve from the given path. This is a confirmed
-Bun bug.
+`createRequire(externalPath)` does not resolve from the given path in compiled binaries.
+This was reproducibly verified with standalone test binaries across multiple loading methods
+(see [Approach 5](#approach-5-bun-native-module-loading-and-the-createrequire-bug)). As of
+Bun 1.3.x, it is unclear whether this is an intentional limitation or an unintended bug.
 
 **Workaround**: Bundle external dependencies at load time (Approach 6 / Final Solution).
 
