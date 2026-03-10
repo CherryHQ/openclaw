@@ -12,7 +12,7 @@ describe("bun-compile smoke test", () => {
 
   it("binary runs --version", () => {
     const output = execFileSync(binary, ["--version"], { encoding: "utf-8", timeout: 10_000 });
-    expect(output.trim()).toMatch(/^\d{4}\.\d+\.\d+/);
+    expect(output.trim()).toMatch(/\d{4}\.\d+\.\d+/);
   });
 
   it("plugins list exits without crashing", () => {

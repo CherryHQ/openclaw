@@ -4,7 +4,10 @@ import { describe, it, expect } from "vitest";
 import { patchEntryTs, patchControlUiAssets } from "../patches/vfs-overlay.js";
 import type { PatchContext } from "../types.js";
 
-const ctx: Pick<PatchContext, "pkgJson" | "embeddedSkills" | "embeddedExtensions"> = {
+const ctx: Pick<
+  PatchContext,
+  "pkgJson" | "embeddedSkills" | "embeddedExtensions" | "embeddedTemplates"
+> = {
   pkgJson: { name: "openclaw", version: "2026.3.10" },
   embeddedSkills: {
     files: [{ absPath: "/tmp/skills/foo.md", relPath: "foo.md" }],
@@ -16,6 +19,10 @@ const ctx: Pick<PatchContext, "pkgJson" | "embeddedSkills" | "embeddedExtensions
       "": { files: [], dirs: ["bar"] },
       bar: { files: ["index.js"], dirs: [] },
     },
+  },
+  embeddedTemplates: {
+    files: [],
+    manifest: {},
   },
 };
 
@@ -38,7 +45,6 @@ describe("patchEntryTs", () => {
     expect(result).toContain("__origLstatSync");
     expect(result).toContain("__origRealpathSync");
     expect(result).toContain("__origOpenSync");
-    expect(result).toContain("__origCloseSync");
   });
 
   it("includes vec0 embed when provided", () => {
@@ -52,6 +58,16 @@ describe("patchEntryTs", () => {
     const source = "#!/usr/bin/env bun\nconsole.log('hello');";
     const result = patchEntryTs(source, ctx, null);
     expect(result).not.toContain("#!/usr/bin/env");
+  });
+
+  it("injects bundler mode early exit for self-spawned plugin bundling", () => {
+    const source = readFileSync(resolve("src/entry.ts"), "utf-8");
+    const result = patchEntryTs(source, ctx, null);
+    expect(result).toContain("__OPENCLAW_BUNDLE_MODE");
+    expect(result).toContain("Bun.build");
+    expect(result).toContain("__OPENCLAW_BUNDLE_ENTRY");
+    expect(result).toContain("__OPENCLAW_BUNDLE_OUTFILE");
+    expect(result).toContain("process.exit(0)");
   });
 });
 

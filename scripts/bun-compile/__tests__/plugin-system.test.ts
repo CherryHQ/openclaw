@@ -4,14 +4,10 @@ import { describe, it, expect } from "vitest";
 import { patchLoaderTs, patchManifestTs, patchDiscoveryTs } from "../patches/plugin-system.js";
 import type { PatchContext } from "../types.js";
 
-const minimalCtx: Pick<
-  PatchContext,
-  "sdkImportLines" | "sdkMapExpr" | "jitiBabelCjs" | "sdkFiles"
-> = {
+const minimalCtx: Pick<PatchContext, "sdkImportLines" | "sdkMapExpr" | "sdkFiles"> = {
   sdkFiles: [{ fullPath: "/tmp/sdk/index.js", basename: "index.js" }],
   sdkImportLines: ['import __sdk0 from "/tmp/sdk/index.js" with { type: "file" };'],
   sdkMapExpr: '{ "index.js": __sdk0 }',
-  jitiBabelCjs: "/path/to/babel.cjs",
 };
 
 describe("patchLoaderTs", () => {
@@ -19,7 +15,6 @@ describe("patchLoaderTs", () => {
     const source = readFileSync(resolve("src/plugins/loader.ts"), "utf-8");
     const result = patchLoaderTs(source, minimalCtx);
     expect(result).toContain("__extractPluginSdk");
-    expect(result).toContain("__extractJitiBabel");
   });
 
   it("replaces modulePath with process.execPath", () => {
@@ -42,21 +37,6 @@ describe("patchLoaderTs", () => {
     expect(result).toContain('includes("$bunfs")');
   });
 
-  it("injects custom createRequire monkey-patch", () => {
-    const source = readFileSync(resolve("src/plugins/loader.ts"), "utf-8");
-    const result = patchLoaderTs(source, minimalCtx);
-    expect(result).toContain("__bunCreateRequire");
-    expect(result).toContain("tryNative: false");
-    expect(result).toContain("fsCache: false");
-  });
-
-  it("injects custom transform for jiti", () => {
-    const source = readFileSync(resolve("src/plugins/loader.ts"), "utf-8");
-    const result = patchLoaderTs(source, minimalCtx);
-    expect(result).toContain("transform(opts");
-    expect(result).toContain("__extractJitiBabel");
-  });
-
   it("injects Error.captureStackTrace patch", () => {
     const source = readFileSync(resolve("src/plugins/loader.ts"), "utf-8");
     const result = patchLoaderTs(source, minimalCtx);
@@ -64,20 +44,32 @@ describe("patchLoaderTs", () => {
     expect(result).toContain("__origCST");
   });
 
-  it("bypasses jiti for $bunfs extensions with manual CJS evaluation", () => {
+  it("uses new Function() CJS wrapper for $bunfs extensions", () => {
     const source = readFileSync(resolve("src/plugins/loader.ts"), "utf-8");
     const result = patchLoaderTs(source, minimalCtx);
     // Should detect $bunfs / __extensions__ paths
     expect(result).toContain('includes("$bunfs")');
     expect(result).toContain('includes("__extensions__")');
-    expect(result).toContain("__vfsResolve");
-    // Should read code and evaluate with CJS wrapper
-    expect(result).toContain("readFileSync(__realPath");
-    expect(result).toContain("__cjsModule");
+    // CJS wrapper for embedded extensions
     expect(result).toContain("new Function");
-    expect(result).toContain("__bunCreateRequireForVfs");
-    // Should still use jiti for non-$bunfs paths
-    expect(result).toContain("getJiti()(safeSource)");
+    expect(result).toContain("__cjsModule");
+    expect(result).toContain("__bunCreateRequire");
+  });
+
+  it("bundles external plugins at load time (replaces jiti)", () => {
+    const source = readFileSync(resolve("src/plugins/loader.ts"), "utf-8");
+    const result = patchLoaderTs(source, minimalCtx);
+    // Spawns self in bundler mode (no external bun needed)
+    expect(result).toContain("__OPENCLAW_BUNDLE_MODE");
+    expect(result).toContain("process.execPath");
+    expect(result).toContain("bun build failed");
+    // Post-processes bundle to rewrite openclaw/plugin-sdk
+    expect(result).toContain("openclaw/plugin-sdk");
+    expect(result).toContain("__bundleCode");
+    // Loads the bundled output
+    expect(result).toContain("require(__bundleOut)");
+    // Should NOT use jiti for any path in compiled binary
+    expect(result).not.toContain("getJiti()(safeSource)");
   });
 });
 
