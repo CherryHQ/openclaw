@@ -252,6 +252,20 @@ export async function readPackageName(_root) { return ${JSON.stringify(ctx.pkgJs
         loader: "ts",
       }));
 
+      // --- protobufjs Long interop fix ---
+      // protobufjs uses eval("require")("long") via inquire(), which in Bun's
+      // bundled output returns { default: Long } instead of Long itself.
+      // Fix: import Long via ESM in entry.ts preamble (Bun handles ESM imports correctly),
+      // set as globalThis.__LongClass, then patch protobufjs to read from it.
+      build.onLoad({ filter: /protobufjs[/\\]src[/\\]util[/\\]minimal\.js$/ }, (args) => {
+        let src = readFileSync(args.path, "utf-8");
+        // Import Long via ESM at top of file (Bun's bundler handles ESM imports
+        // correctly, resolving the default export without CJS interop issues).
+        src = `import __Long from "long";\n` + src;
+        src = src.replace(/util\.Long\s*=[\s\S]*?util\.inquire\("long"\);/, `util.Long = __Long;`);
+        return { contents: src, loader: "js" };
+      });
+
       // --- Plugin system patchers ---
       build.onLoad({ filter: /plugins[/\\]loader\.ts$/ }, (args) => ({
         contents: patchLoaderTs(readFileSync(args.path, "utf-8"), ctx),
@@ -418,7 +432,6 @@ if (existsSync(sdkTempDir)) {
 }
 const sdkMapEntries = sdkFiles.map((f, i) => `${JSON.stringify(f.basename)}: __sdk${i}`);
 const sdkMapExpr = sdkFiles.length > 0 ? `{ ${sdkMapEntries.join(", ")} }` : "{}";
-const jitiBabelCjs = resolve("node_modules/jiti/dist/babel.cjs");
 
 // --- Resolve control-ui files ---
 const controlUiFiles: { absPath: string; relPath: string }[] = [];
@@ -451,7 +464,6 @@ const ctx: PatchContext = {
   sdkFiles,
   sdkImportLines,
   sdkMapExpr,
-  jitiBabelCjs,
   controlUiFiles,
   embeddedSkills,
   embeddedExtensions,

@@ -8,9 +8,29 @@ import {
   writeFileSync,
 } from "node:fs";
 import { join, resolve } from "node:path";
-import esbuild from "esbuild";
+import type { BunPlugin } from "bun";
 import { buildExternals } from "./externals.js";
 import type { TargetPlatform } from "./types.js";
+
+/**
+ * Bun.build plugin to fix protobufjs Long CJS/ESM interop.
+ * protobufjs uses eval("require")("long") via inquire(), which returns
+ * { default: Long } instead of Long in Bun's bundled output.
+ * Fix: inject ESM import at top of file and assign directly.
+ */
+function createProtobufLongFixPlugin(): BunPlugin {
+  return {
+    name: "protobuf-long-fix",
+    setup(build) {
+      build.onLoad({ filter: /protobufjs[/\\]src[/\\]util[/\\]minimal\.js$/ }, (args) => {
+        let src = readFileSync(args.path, "utf-8");
+        src = `import __Long from "long";\n` + src;
+        src = src.replace(/util\.Long\s*=[\s\S]*?util\.inquire\("long"\);/, `util.Long = __Long;`);
+        return { contents: src, loader: "js" };
+      });
+    },
+  };
+}
 
 export interface BundledExtensionInfo {
   name: string;
@@ -72,7 +92,7 @@ export async function bundleExtensions(
     extDirs.push({ name: entry.name, dir: extDir, entry: entryFile });
   }
 
-  console.log(`[bun-compile] Bundling ${extDirs.length} extensions...`);
+  console.log(`[bun-compile] Bundling ${extDirs.length} extensions with Bun.build...`);
 
   const extExternals = [...buildExternals(platform)];
 
@@ -84,32 +104,27 @@ export async function bundleExtensions(
     mkdirSync(outDir, { recursive: true });
 
     try {
-      // Use esbuild for clean CJS output — no .default interop bugs,
-      // no import.meta in CJS, compatible with jiti's CJS VM evaluation.
-      const bundleResult = await esbuild.build({
-        entryPoints: [ext.entry],
+      // CJS format so extensions can be loaded with new Function() CJS wrapper
+      // in the compiled binary (preserves require resolution from binary context).
+      // define replaces import.meta.* which isn't valid inside CJS function wrapper.
+      const bundleResult = await Bun.build({
+        entrypoints: [ext.entry],
         outdir: outDir,
-        bundle: true,
-        platform: "node",
+        target: "bun",
         format: "cjs",
         minify: true,
         external: extExternals,
-        logLevel: "warning",
-        loader: { ".node": "copy" },
-        // esbuild empties import.meta in CJS — shim with __filename-based URL
-        banner: {
-          js: 'var __import_meta_url = typeof __filename !== "undefined" ? require("url").pathToFileURL(__filename).href : "file:///bundled-extension";',
-        },
+        plugins: [createProtobufLongFixPlugin()],
+        loader: { ".node": "file" },
         define: {
-          "import.meta.url": "__import_meta_url",
           "import.meta.resolve": "require.resolve",
         },
       });
 
-      if (bundleResult.errors.length > 0) {
+      if (!bundleResult.success) {
         console.warn(`[bun-compile] Extension ${ext.name}: bundle failed`);
-        for (const err of bundleResult.errors) {
-          console.warn(`  ${err.text}`);
+        for (const msg of bundleResult.logs) {
+          console.warn(`  ${msg}`);
         }
         failures.push(ext.name);
         cpSync(ext.dir, outDir, { recursive: true });
