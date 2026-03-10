@@ -49,6 +49,14 @@ describe("runtime-guard", () => {
     expect(runtimeSatisfies(nodeOld)).toBe(false);
     expect(runtimeSatisfies(nodeTooOld)).toBe(false);
     expect(runtimeSatisfies(unknown)).toBe(false);
+
+    const bun: RuntimeDetails = {
+      kind: "bun",
+      version: "1.2.5",
+      execPath: "/usr/local/bin/bun",
+      pathEnv: "/usr/bin",
+    };
+    expect(runtimeSatisfies(bun)).toBe(true);
   });
 
   it("throws via exit when runtime is too old", () => {

@@ -4,6 +4,7 @@ import path from "node:path";
 import { formatCliCommand } from "../cli/command-format.js";
 import type { loadConfig } from "../config/config.js";
 import { resolveStateDir } from "../config/paths.js";
+import { isBunCompiledBinary } from "../daemon/runtime-binary.js";
 import { runCommandWithTimeout } from "../process/exec.js";
 import { VERSION } from "../version.js";
 import { writeJsonAtomic } from "./json-files.js";
@@ -243,7 +244,10 @@ async function runAutoUpdateCommand(params: {
     lowerExecBase === "bun" ||
     lowerExecBase === "bun.exe";
   const argv: string[] = [];
-  if (execPath && argv1) {
+  if (isBunCompiledBinary() && execPath) {
+    // Compiled binary: execPath IS the CLI, no script argument needed
+    argv.push(execPath, ...baseArgs);
+  } else if (execPath && argv1) {
     argv.push(execPath, argv1, ...baseArgs);
   } else if (execPath && !runtimeIsNodeOrBun) {
     argv.push(execPath, ...baseArgs);
@@ -361,7 +365,7 @@ export async function runGatewayUpdateCheck(params: {
     lastCheckedAt: new Date(now).toISOString(),
   };
 
-  if (status.installKind !== "package") {
+  if (status.installKind !== "package" && status.installKind !== "binary") {
     delete nextState.lastAvailableVersion;
     delete nextState.lastAvailableTag;
     clearAutoState(nextState);
@@ -374,18 +378,40 @@ export async function runGatewayUpdateCheck(params: {
   }
 
   const channel = normalizeUpdateChannel(params.cfg.update?.channel) ?? DEFAULT_PACKAGE_CHANNEL;
-  const resolved = await resolveNpmChannelTag({ channel, timeoutMs: 2500 });
-  const tag = resolved.tag;
-  if (!resolved.version) {
+
+  let resolvedVersion: string | null = null;
+  let resolvedTag = "latest";
+
+  if (status.installKind === "binary") {
+    const { fetchGitHubRelease } = await import("./update-check.js");
+    const release = await fetchGitHubRelease({ channel, timeoutMs: 2500 });
+    if (!release?.version) {
+      await writeState(statePath, nextState);
+      return;
+    }
+    resolvedVersion = release.version;
+    resolvedTag = release.prerelease ? "beta" : "latest";
+  } else {
+    const resolved = await resolveNpmChannelTag({ channel, timeoutMs: 2500 });
+    resolvedTag = resolved.tag;
+    if (!resolved.version) {
+      await writeState(statePath, nextState);
+      return;
+    }
+    resolvedVersion = resolved.version;
+  }
+
+  const tag = resolvedTag;
+  if (!resolvedVersion) {
     await writeState(statePath, nextState);
     return;
   }
 
-  const cmp = compareSemverStrings(VERSION, resolved.version);
+  const cmp = compareSemverStrings(VERSION, resolvedVersion);
   if (cmp != null && cmp < 0) {
     const nextAvailable: UpdateAvailable = {
       currentVersion: VERSION,
-      latestVersion: resolved.version,
+      latestVersion: resolvedVersion,
       channel: tag,
     };
     if (shouldRunUpdateHints) {
@@ -394,15 +420,15 @@ export async function runGatewayUpdateCheck(params: {
         onUpdateAvailableChange: params.onUpdateAvailableChange,
       });
     }
-    nextState.lastAvailableVersion = resolved.version;
+    nextState.lastAvailableVersion = resolvedVersion;
     nextState.lastAvailableTag = tag;
     const shouldNotify =
-      state.lastNotifiedVersion !== resolved.version || state.lastNotifiedTag !== tag;
+      state.lastNotifiedVersion !== resolvedVersion || state.lastNotifiedTag !== tag;
     if (shouldRunUpdateHints && shouldNotify) {
       params.log.info(
-        `update available (${tag}): v${resolved.version} (current v${VERSION}). Run: ${formatCliCommand("openclaw update")}`,
+        `update available (${tag}): v${resolvedVersion} (current v${VERSION}). Run: ${formatCliCommand("openclaw update")}`,
       );
-      nextState.lastNotifiedVersion = resolved.version;
+      nextState.lastNotifiedVersion = resolvedVersion;
       nextState.lastNotifiedTag = tag;
     }
 
@@ -414,7 +440,7 @@ export async function runGatewayUpdateCheck(params: {
           : ONE_HOUR_MS;
       const lastAttemptAt = state.autoLastAttemptAt ? Date.parse(state.autoLastAttemptAt) : null;
       const recentAttemptForSameVersion =
-        state.autoLastAttemptVersion === resolved.version &&
+        state.autoLastAttemptVersion === resolvedVersion &&
         lastAttemptAt != null &&
         Number.isFinite(lastAttemptAt) &&
         now - lastAttemptAt < attemptIntervalMs;
@@ -426,7 +452,7 @@ export async function runGatewayUpdateCheck(params: {
           state,
           nextState,
           nowMs: now,
-          version: resolved.version,
+          version: resolvedVersion,
           tag,
           stableDelayHours: auto.stableDelayHours,
           stableJitterHours: auto.stableJitterHours,
@@ -436,17 +462,17 @@ export async function runGatewayUpdateCheck(params: {
 
       if (!dueNow) {
         params.log.info("auto-update deferred (stable rollout window active)", {
-          version: resolved.version,
+          version: resolvedVersion,
           tag,
           applyAfter: applyAfterMs ? new Date(applyAfterMs).toISOString() : undefined,
         });
       } else if (recentAttemptForSameVersion) {
         params.log.info("auto-update deferred (recent attempt exists)", {
-          version: resolved.version,
+          version: resolvedVersion,
           tag,
         });
       } else {
-        nextState.autoLastAttemptVersion = resolved.version;
+        nextState.autoLastAttemptVersion = resolvedVersion;
         nextState.autoLastAttemptAt = new Date(now).toISOString();
         const outcome = await runAuto({
           channel,
@@ -454,17 +480,17 @@ export async function runGatewayUpdateCheck(params: {
           root: root ?? undefined,
         });
         if (outcome.ok) {
-          nextState.autoLastSuccessVersion = resolved.version;
+          nextState.autoLastSuccessVersion = resolvedVersion;
           nextState.autoLastSuccessAt = new Date(now).toISOString();
           params.log.info("auto-update applied", {
             channel,
-            version: resolved.version,
+            version: resolvedVersion,
             tag,
           });
         } else {
           params.log.info("auto-update attempt failed", {
             channel,
-            version: resolved.version,
+            version: resolvedVersion,
             tag,
             reason: outcome.reason ?? `exit:${outcome.code}`,
           });

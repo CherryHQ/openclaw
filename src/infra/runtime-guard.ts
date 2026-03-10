@@ -1,7 +1,7 @@
 import process from "node:process";
 import { defaultRuntime, type RuntimeEnv } from "../runtime.js";
 
-export type RuntimeKind = "node" | "unknown";
+export type RuntimeKind = "node" | "bun" | "unknown";
 
 type Semver = {
   major: number;
@@ -50,8 +50,13 @@ export function isAtLeast(version: Semver | null, minimum: Semver): boolean {
 }
 
 export function detectRuntime(): RuntimeDetails {
-  const kind: RuntimeKind = process.versions?.node ? "node" : "unknown";
-  const version = process.versions?.node ?? null;
+  // Bun sets process.versions.bun; check it before Node since Bun also
+  // populates process.versions.node with its Node compat version.
+  const isBun = !!(process.versions as Record<string, string | undefined>)?.bun;
+  const kind: RuntimeKind = isBun ? "bun" : process.versions?.node ? "node" : "unknown";
+  const version = isBun
+    ? ((process.versions as Record<string, string | undefined>).bun ?? null)
+    : (process.versions?.node ?? null);
 
   return {
     kind,
@@ -62,6 +67,10 @@ export function detectRuntime(): RuntimeDetails {
 }
 
 export function runtimeSatisfies(details: RuntimeDetails): boolean {
+  if (details.kind === "bun") {
+    // Bun has its own version scheme; skip the Node minimum check.
+    return true;
+  }
   const parsed = parseSemver(details.version);
   if (details.kind === "node") {
     return isAtLeast(parsed, MIN_NODE);

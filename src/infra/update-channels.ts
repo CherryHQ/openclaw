@@ -36,11 +36,15 @@ export function isStableTag(tag: string): boolean {
 
 export function resolveEffectiveUpdateChannel(params: {
   configChannel?: UpdateChannel | null;
-  installKind: "git" | "package" | "unknown";
+  installKind: "git" | "package" | "binary" | "unknown";
   git?: { tag?: string | null; branch?: string | null };
 }): { channel: UpdateChannel; source: UpdateChannelSource } {
   if (params.configChannel) {
     return { channel: params.configChannel, source: "config" };
+  }
+
+  if (params.installKind === "binary") {
+    return { channel: DEFAULT_PACKAGE_CHANNEL, source: "default" };
   }
 
   if (params.installKind === "git") {
@@ -84,7 +88,7 @@ export function formatUpdateChannelLabel(params: {
 
 export function resolveUpdateChannelDisplay(params: {
   configChannel?: UpdateChannel | null;
-  installKind: "git" | "package" | "unknown";
+  installKind: "git" | "package" | "binary" | "unknown";
   gitTag?: string | null;
   gitBranch?: string | null;
 }): { channel: UpdateChannel; source: UpdateChannelSource; label: string } {

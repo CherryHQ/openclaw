@@ -9,6 +9,7 @@ permissions: {}
 
 jobs:
   stale:
+    if: github.repository == 'openclaw/openclaw'
     permissions:
       issues: write
       pull-requests: write

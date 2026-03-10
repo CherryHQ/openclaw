@@ -22,3 +22,13 @@ export function isBunRuntime(execPath: string): boolean {
   const base = normalizeRuntimeBasename(execPath);
   return base === "bun" || base === "bun.exe";
 }
+
+// Bun compiled binaries: process.versions.bun exists but execPath is NOT "bun" itself
+export function isBunCompiledBinary(): boolean {
+  const versions = process.versions as Record<string, string | undefined>;
+  if (!versions.bun) {
+    return false;
+  }
+  const base = normalizeRuntimeBasename(process.execPath);
+  return base !== "bun" && base !== "bun.exe";
+}
