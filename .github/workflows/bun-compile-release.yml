@@ -33,10 +33,11 @@ jobs:
             binary: openclaw
           - os: darwin
             arch: x64
-            runner: macos-13
+            runner: macos-latest
             target: bun-darwin-x64
             artifact: openclaw-darwin-x64
             binary: openclaw
+            cross: true
 
           # Linux
           - os: linux
