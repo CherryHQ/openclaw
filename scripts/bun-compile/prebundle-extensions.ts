@@ -94,7 +94,14 @@ export async function bundleExtensions(
 
   console.log(`[bun-compile] Bundling ${extDirs.length} extensions with Bun.build...`);
 
-  const extExternals = [...buildExternals(platform)];
+  const extExternals = [
+    ...buildExternals(platform),
+    // Keep plugin-sdk external — it's shared across all extensions and resolved
+    // at runtime via a proxy require that redirects to the extracted SDK dir.
+    // Without this, each extension bundles ~26MB of core code (models, providers, etc.).
+    "openclaw/plugin-sdk",
+    "openclaw/plugin-sdk/*",
+  ];
 
   const results: BundledExtensionInfo[] = [];
   const failures: string[] = [];

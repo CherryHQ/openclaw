@@ -16,6 +16,8 @@ export function buildExternals(platform: TargetPlatform): string[] {
     "authenticate-pam",
     "@napi-rs/canvas",
     "@matrix-org/matrix-sdk-crypto-nodejs",
+    "@lancedb/lancedb",
+    "@lancedb/*",
     "koffi",
   ];
 
