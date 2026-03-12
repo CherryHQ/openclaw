@@ -111,6 +111,10 @@ export async function downloadAndReplaceBinary(params: {
       await fs.rename(stagePath, execPath);
     }
 
+    // Update the sidecar package.json so external readers (update-runner,
+    // plugin loader, install scripts) see the correct version.
+    await updateSidecarPackageJson(path.dirname(execPath), params.release.version);
+
     return {
       status: "ok",
       before: params.release.version,
@@ -143,6 +147,23 @@ async function findExtractedBinary(dir: string, name: string): Promise<string | 
     // ignore
   }
   return null;
+}
+
+async function updateSidecarPackageJson(dir: string, version: string): Promise<void> {
+  const pkgPath = path.join(dir, "package.json");
+  try {
+    const raw = await fs.readFile(pkgPath, "utf-8");
+    const pkg = JSON.parse(raw) as Record<string, unknown>;
+    pkg.version = version;
+    await fs.writeFile(pkgPath, JSON.stringify(pkg, null, 2) + "\n");
+  } catch {
+    // No existing package.json — create a minimal one
+    try {
+      await fs.writeFile(pkgPath, JSON.stringify({ name: "openclaw", version }, null, 2) + "\n");
+    } catch {
+      // Best-effort; binary itself has the version hardcoded
+    }
+  }
 }
 
 export async function cleanupOldBinary(): Promise<void> {
