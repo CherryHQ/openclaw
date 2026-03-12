@@ -257,6 +257,49 @@ describe("resolveModel", () => {
     expect(result.model?.id).toBe("missing-model");
   });
 
+  it("defaults fallback model input to text+image for vision support", () => {
+    const cfg = {
+      models: {
+        providers: {
+          custom: {
+            baseUrl: "http://localhost:9000",
+            models: [],
+          },
+        },
+      },
+    } as OpenClawConfig;
+
+    const result = resolveModel("custom", "missing-model", "/tmp/agent", cfg);
+
+    expect(result.model?.input).toEqual(["text", "image"]);
+  });
+
+  it("respects configured model input override in fallback path", () => {
+    const cfg = {
+      models: {
+        providers: {
+          custom: {
+            baseUrl: "http://localhost:9000",
+            models: [
+              { ...makeModel("text-only-model"), input: ["text"] as Array<"text" | "image"> },
+            ],
+          },
+        },
+      },
+    } as OpenClawConfig;
+
+    const result = resolveModel("custom", "text-only-model", "/tmp/agent", cfg);
+
+    expect(result.model?.input).toEqual(["text"]);
+  });
+
+  it("defaults openrouter fallback model input to text+image", () => {
+    const result = resolveModel("openrouter", "some-random-model", "/tmp/agent");
+
+    expect(result.error).toBeUndefined();
+    expect(result.model?.input).toEqual(["text", "image"]);
+  });
+
   it("includes provider headers in provider fallback model", () => {
     const cfg = {
       models: {
