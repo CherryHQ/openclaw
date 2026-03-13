@@ -41,7 +41,7 @@ export type NpmTagStatus = {
 
 export type UpdateCheckResult = {
   root: string | null;
-  installKind: "git" | "package" | "unknown";
+  installKind: "git" | "package" | "binary" | "unknown";
   packageManager: PackageManager;
   git?: GitUpdateStatus;
   deps?: DepsStatus;
@@ -61,6 +61,15 @@ export function formatGitInstallLabel(update: UpdateCheckResult): string | null 
     shortSha ? `@ ${shortSha}` : null,
   ].filter(Boolean);
   return parts.join(" · ");
+}
+
+export function isBinaryInstall(): boolean {
+  const execBase = path.basename(process.execPath).toLowerCase();
+  const nodeOrBun = new Set(["node", "node.exe", "bun", "bun.exe"]);
+  if (nodeOrBun.has(execBase)) {
+    return false;
+  }
+  return execBase === "openclaw" || execBase === "openclaw.exe";
 }
 
 async function exists(p: string): Promise<boolean> {
@@ -467,7 +476,11 @@ export async function checkUpdateStatus(params: {
   const gitRoot = await detectGitRoot(root);
   const isGit = gitRoot && path.resolve(gitRoot) === root;
 
-  const installKind: UpdateCheckResult["installKind"] = isGit ? "git" : "package";
+  const installKind: UpdateCheckResult["installKind"] = isBinaryInstall()
+    ? "binary"
+    : isGit
+      ? "git"
+      : "package";
   const git = isGit
     ? await checkGitUpdateStatus({
         root,
@@ -486,4 +499,80 @@ export async function checkUpdateStatus(params: {
     deps,
     registry,
   };
+}
+
+export type GitHubReleaseInfo = {
+  tagName: string;
+  version: string;
+  prerelease: boolean;
+  assets: Array<{ name: string; url: string; size: number }>;
+};
+
+export async function fetchGitHubRelease(params: {
+  channel: UpdateChannel;
+  timeoutMs?: number;
+}): Promise<GitHubReleaseInfo | null> {
+  const timeoutMs = params.timeoutMs ?? 5000;
+  try {
+    const { resolveUpdateMirror, getMirrorConfig } = await import("./update-mirror.js");
+    const mirror = await resolveUpdateMirror({ timeoutMs: Math.min(3000, timeoutMs) });
+    const mirrorConfig = getMirrorConfig(mirror);
+    const releasesApi = mirrorConfig.releasesApi;
+
+    const url = params.channel === "beta" ? releasesApi : `${releasesApi}/latest`;
+
+    const res = await fetchWithTimeout(
+      url,
+      {
+        headers: {
+          Accept: mirrorConfig.acceptHeader,
+          "User-Agent": "openclaw-updater",
+        },
+      },
+      Math.max(500, timeoutMs),
+    );
+    if (!res.ok) {
+      return null;
+    }
+
+    const json = await res.json();
+
+    // For beta, find the first prerelease; for stable, /latest already returns the latest non-prerelease
+    const release =
+      params.channel === "beta"
+        ? Array.isArray(json)
+          ? ((json as Array<Record<string, unknown>>).find((r) => r.prerelease) ?? json[0])
+          : json
+        : json;
+
+    if (!release?.tag_name) {
+      return null;
+    }
+
+    const tagName = String(release.tag_name);
+    const version = tagName.startsWith("v") ? tagName.slice(1) : tagName;
+
+    type RawAsset = { name?: string; browser_download_url?: string; size?: number };
+    const rawAssets = (release.assets ?? []) as RawAsset[];
+
+    return {
+      tagName,
+      version,
+      prerelease: Boolean(release.prerelease),
+      assets: rawAssets.map((a) => ({
+        name: a.name ?? "",
+        url: a.browser_download_url ?? "",
+        size: Number(a.size ?? 0),
+      })),
+    };
+  } catch {
+    return null;
+  }
+}
+
+export function resolveReleaseAssetName(): string {
+  const plat = process.platform === "win32" ? "windows" : process.platform;
+  const arch = process.arch;
+  const ext = process.platform === "win32" ? "zip" : "tar.gz";
+  return `openclaw-${plat}-${arch}.${ext}`;
 }

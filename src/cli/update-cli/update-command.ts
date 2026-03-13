@@ -12,6 +12,7 @@ import {
 } from "../../config/config.js";
 import { formatConfigIssueLines } from "../../config/issue-format.js";
 import { resolveGatewayService } from "../../daemon/service.js";
+import { downloadAndReplaceBinary, cleanupOldBinary } from "../../infra/update-binary.js";
 import {
   channelToNpmTag,
   DEFAULT_GIT_CHANNEL,
@@ -22,6 +23,9 @@ import {
   compareSemverStrings,
   resolveNpmChannelTag,
   checkUpdateStatus,
+  fetchGitHubRelease,
+  isBinaryInstall,
+  resolveReleaseAssetName,
 } from "../../infra/update-check.js";
 import {
   createGlobalInstallEnv,
@@ -37,6 +41,7 @@ import { defaultRuntime } from "../../runtime.js";
 import { stylePromptMessage } from "../../terminal/prompt-style.js";
 import { theme } from "../../terminal/theme.js";
 import { pathExists } from "../../utils.js";
+import { VERSION } from "../../version.js";
 import { replaceCliName, resolveCliName } from "../cli-name.js";
 import { formatCliCommand } from "../command-format.js";
 import { installCompletion } from "../completion-cli.js";
@@ -120,9 +125,9 @@ function formatCommandFailure(stdout: string, stderr: string): string {
 type UpdateDryRunPreview = {
   dryRun: true;
   root: string;
-  installKind: "git" | "package" | "unknown";
-  mode: UpdateRunResult["mode"];
-  updateInstallKind: "git" | "package" | "unknown";
+  installKind: "git" | "package" | "binary" | "unknown";
+  mode: UpdateRunResult["mode"] | "binary";
+  updateInstallKind: "git" | "package" | "binary" | "unknown";
   switchToGit: boolean;
   switchToPackage: boolean;
   restart: boolean;
@@ -260,7 +265,7 @@ async function tryInstallShellCompletion(opts: {
 
 async function runPackageInstallUpdate(params: {
   root: string;
-  installKind: "git" | "package" | "unknown";
+  installKind: "git" | "package" | "binary" | "unknown";
   tag: string;
   timeoutMs: number;
   startedAt: number;
@@ -333,7 +338,7 @@ async function runPackageInstallUpdate(params: {
 async function runGitUpdate(params: {
   root: string;
   switchToGit: boolean;
-  installKind: "git" | "package" | "unknown";
+  installKind: "git" | "package" | "binary" | "unknown";
   timeoutMs: number | undefined;
   startedAt: number;
   progress: ReturnType<typeof createUpdateProgress>["progress"];
@@ -689,7 +694,11 @@ export async function updateCommand(opts: UpdateCommandOptions): Promise<void> {
   let fallbackToLatest = false;
 
   if (updateInstallKind !== "git") {
-    currentVersion = switchToPackage ? null : await readPackageVersion(root);
+    currentVersion = isBinaryInstall()
+      ? VERSION
+      : switchToPackage
+        ? null
+        : await readPackageVersion(root);
     targetVersion = explicitTag
       ? await resolveTargetVersion(tag, timeoutMs)
       : await resolveNpmChannelTag({ channel, timeoutMs }).then((resolved) => {
@@ -706,8 +715,10 @@ export async function updateCommand(opts: UpdateCommandOptions): Promise<void> {
   }
 
   if (opts.dryRun) {
-    let mode: UpdateRunResult["mode"] = "unknown";
-    if (updateInstallKind === "git") {
+    let mode: UpdateDryRunPreview["mode"] = "unknown";
+    if (updateInstallKind === "binary") {
+      mode = "binary";
+    } else if (updateInstallKind === "git") {
       mode = "git";
     } else if (updateInstallKind === "package") {
       mode = await resolveGlobalManager({
@@ -721,7 +732,9 @@ export async function updateCommand(opts: UpdateCommandOptions): Promise<void> {
     if (requestedChannel && requestedChannel !== storedChannel) {
       actions.push(`Persist update.channel=${requestedChannel} in config`);
     }
-    if (switchToGit) {
+    if (isBinaryInstall()) {
+      actions.push(`Download and replace binary from GitHub release (${tag})`);
+    } else if (switchToGit) {
       actions.push("Switch install mode from package to git checkout (dev channel)");
     } else if (switchToPackage) {
       actions.push(`Switch install mode from git to package manager (${mode})`);
@@ -845,32 +858,97 @@ export async function updateCommand(opts: UpdateCommandOptions): Promise<void> {
     }
   }
 
-  const result =
-    updateInstallKind === "package"
-      ? await runPackageInstallUpdate({
-          root,
-          installKind,
-          tag,
-          timeoutMs: timeoutMs ?? 20 * 60_000,
-          startedAt,
-          progress,
-        })
-      : await runGitUpdate({
-          root,
-          switchToGit,
-          installKind,
-          timeoutMs,
-          startedAt,
-          progress,
-          channel,
-          tag,
-          showProgress,
-          opts,
-          stop,
-        });
+  // Clean up any .old binary from a previous Windows update
+  await cleanupOldBinary();
+
+  let result: UpdateRunResult;
+
+  if (isBinaryInstall()) {
+    progress.onStepStart?.({ name: "check releases", command: "", index: 0, total: 3 });
+    const release = await fetchGitHubRelease({ channel, timeoutMs: timeoutMs ?? 10_000 });
+    if (!release) {
+      stop();
+      if (!opts.json) {
+        defaultRuntime.log(theme.error("Failed to check GitHub releases."));
+      }
+      defaultRuntime.exit(1);
+      return;
+    }
+
+    const cmpResult = compareSemverStrings(currentVersion ?? "0.0.0", release.version);
+    if (cmpResult != null && cmpResult >= 0) {
+      stop();
+      if (!opts.json) {
+        defaultRuntime.log(theme.success(`Already up to date (${release.version}).`));
+      }
+      defaultRuntime.exit(0);
+      return;
+    }
+
+    progress.onStepStart?.({
+      name: "download and replace binary",
+      command: "",
+      index: 1,
+      total: 3,
+    });
+    const assetName = resolveReleaseAssetName();
+    const binaryResult = await downloadAndReplaceBinary({
+      release,
+      assetName,
+      timeoutMs: timeoutMs ?? 120_000,
+    });
+
+    stop();
+    if (binaryResult.status === "error") {
+      if (!opts.json) {
+        defaultRuntime.log(theme.error(`Update failed: ${binaryResult.error}`));
+      }
+      defaultRuntime.exit(1);
+      return;
+    }
+
+    if (!opts.json) {
+      defaultRuntime.log(theme.success(`Updated to ${release.version}`));
+    }
+
+    result = {
+      status: "ok",
+      mode: "npm",
+      root,
+      before: { version: currentVersion },
+      after: { version: release.version },
+      steps: [],
+      durationMs: Date.now() - startedAt,
+    };
+  } else if (updateInstallKind === "package") {
+    result = await runPackageInstallUpdate({
+      root,
+      installKind,
+      tag,
+      timeoutMs: timeoutMs ?? 20 * 60_000,
+      startedAt,
+      progress,
+    });
+  } else {
+    result = await runGitUpdate({
+      root,
+      switchToGit,
+      installKind,
+      timeoutMs,
+      startedAt,
+      progress,
+      channel,
+      tag,
+      showProgress,
+      opts,
+      stop,
+    });
+  }
 
   stop();
-  printResult(result, { ...opts, hideSteps: showProgress });
+  if (!isBinaryInstall()) {
+    printResult(result, { ...opts, hideSteps: showProgress });
+  }
 
   if (result.status === "error") {
     defaultRuntime.exit(1);

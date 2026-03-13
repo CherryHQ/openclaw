@@ -5,7 +5,7 @@ import {
   normalizeUpdateChannel,
   resolveEffectiveUpdateChannel,
 } from "../../infra/update-channels.js";
-import { checkUpdateStatus } from "../../infra/update-check.js";
+import { checkUpdateStatus, isBinaryInstall } from "../../infra/update-check.js";
 import { defaultRuntime } from "../../runtime.js";
 import { selectStyled } from "../../terminal/prompt-select-styled.js";
 import { stylePromptMessage } from "../../terminal/prompt-style.js";
@@ -63,30 +63,29 @@ export async function updateWizardCommand(opts: UpdateWizardOptions = {}): Promi
     gitBranch: updateStatus.git?.branch ?? null,
   });
 
+  const channelOptions = [
+    {
+      value: "keep",
+      label: `Keep current (${channelInfo.channel})`,
+      hint: channelLabel,
+    },
+    {
+      value: "stable",
+      label: "Stable",
+      hint: "Tagged releases",
+    },
+    {
+      value: "beta",
+      label: "Beta",
+      hint: "Prereleases",
+    },
+    // Binary installs don't support dev (no git checkout)
+    ...(!isBinaryInstall() ? [{ value: "dev", label: "Dev", hint: "Git main" }] : []),
+  ];
+
   const pickedChannel = await selectStyled({
     message: "Update channel",
-    options: [
-      {
-        value: "keep",
-        label: `Keep current (${channelInfo.channel})`,
-        hint: channelLabel,
-      },
-      {
-        value: "stable",
-        label: "Stable",
-        hint: "Tagged releases (npm latest)",
-      },
-      {
-        value: "beta",
-        label: "Beta",
-        hint: "Prereleases (npm beta)",
-      },
-      {
-        value: "dev",
-        label: "Dev",
-        hint: "Git main",
-      },
-    ],
+    options: channelOptions,
     initialValue: "keep",
   });
 
