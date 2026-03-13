@@ -227,13 +227,16 @@ export function patchEntryTs(
 
 function buildVfsMonkeyPatches(): string[] {
   return [
+    `function __vfsNorm(s: string): string { return s.replace(/\\\\/g, "/"); }`,
     `function __vfsLookup(p: string): { rel: string; fileMap: Record<string, string>; dirManifest: Record<string, { files: string[]; dirs: string[] }> } | null {`,
+    `  const np = __vfsNorm(p);`,
     `  for (const r of __vfsRoots) {`,
-    `    if (!p.startsWith(r.vroot)) continue;`,
-    `    if (p === r.vroot) return { rel: "", fileMap: r.fileMap, dirManifest: r.dirManifest };`,
-    `    const after = p.slice(r.vroot.length);`,
-    `    if (after[0] !== "/" && after[0] !== "\\\\") continue;`,
-    `    return { rel: after.slice(1).replace(/\\\\\\\\/g, "/"), fileMap: r.fileMap, dirManifest: r.dirManifest };`,
+    `    const nv = __vfsNorm(r.vroot);`,
+    `    if (!np.startsWith(nv)) continue;`,
+    `    if (np === nv) return { rel: "", fileMap: r.fileMap, dirManifest: r.dirManifest };`,
+    `    const after = np.slice(nv.length);`,
+    `    if (after[0] !== "/") continue;`,
+    `    return { rel: after.slice(1), fileMap: r.fileMap, dirManifest: r.dirManifest };`,
     `  }`,
     `  return null;`,
     `}`,
