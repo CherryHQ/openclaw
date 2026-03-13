@@ -173,7 +173,6 @@ export function killProcessTree(pid: number): void {
       spawn("taskkill", ["/F", "/T", "/PID", String(pid)], {
         stdio: "ignore",
         detached: true,
-        windowsHide: true,
       });
     } catch {
       // ignore errors if taskkill fails
