@@ -37,6 +37,7 @@ export default defineConfig({
       "src/**/*.test.ts",
       "extensions/**/*.test.ts",
       "test/**/*.test.ts",
+      "scripts/bun-compile/__tests__/*.test.ts",
       "ui/src/ui/app-chat.test.ts",
       "ui/src/ui/views/agents-utils.test.ts",
       "ui/src/ui/views/chat.test.ts",

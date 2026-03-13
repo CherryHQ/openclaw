@@ -16,6 +16,7 @@ jobs:
   # Detect docs-only changes to skip heavy jobs (test, build, Windows, macOS, Android).
   # Lint and format always run. Fail-safe: if detection fails, run everything.
   docs-scope:
+    if: github.repository == 'openclaw/openclaw'
     runs-on: blacksmith-16vcpu-ubuntu-2404
     outputs:
       docs_only: ${{ steps.check.outputs.docs_only }}
@@ -414,6 +415,7 @@ jobs:
         run: python -m pytest -q skills
 
   secrets:
+    if: github.repository == 'openclaw/openclaw'
     runs-on: blacksmith-16vcpu-ubuntu-2404
     steps:
       - name: Checkout
