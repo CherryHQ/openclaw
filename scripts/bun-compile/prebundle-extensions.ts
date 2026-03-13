@@ -119,7 +119,7 @@ export async function bundleExtensions(
         outdir: outDir,
         target: "bun",
         format: "cjs",
-        minify: true,
+        minify: false,
         external: extExternals,
         plugins: [createProtobufLongFixPlugin()],
         loader: { ".node": "file" },

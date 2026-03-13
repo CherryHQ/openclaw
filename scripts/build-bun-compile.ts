@@ -487,7 +487,9 @@ const result = await Bun.build({
   compile: compileOptions as { outfile: string; target?: string },
   plugins: [plugin],
   external: externals,
-  minify: true,
+  // Bun's minifier generates broken references (undefined variables like 'xFa')
+  // in large bundles. Binary is already compressed, so minify saves nothing.
+  minify: false,
   env: "OPENCLAW_NO_RESPAWN*",
 });
 
