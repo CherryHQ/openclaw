@@ -173,6 +173,7 @@ export async function runPinnedWriteHelper(params: {
     ],
     {
       stdio: ["pipe", "pipe", "pipe"],
+      windowsHide: true,
     },
   );
 
