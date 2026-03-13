@@ -105,7 +105,6 @@ if (
       {
         stdio: "inherit",
         env: process.env,
-        windowsHide: true,
       },
     );
 
