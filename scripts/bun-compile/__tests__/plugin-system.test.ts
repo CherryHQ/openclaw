@@ -35,10 +35,10 @@ describe("patchLoaderTs", () => {
     expect(result).toContain("__extractPluginSdk()");
   });
 
-  it("injects $bunfs VFS bypass for openBoundaryFileSync", () => {
+  it("injects origin check bypass for openBoundaryFileSync", () => {
     const source = readFileSync(resolve("src/plugins/loader.ts"), "utf-8");
     const result = patchLoaderTs(source, minimalCtx);
-    expect(result).toContain('includes("$bunfs")');
+    expect(result).toContain('candidate.origin === "bundled"');
   });
 
   it("injects Error.captureStackTrace patch", () => {
@@ -104,8 +104,8 @@ describe("patchLoaderTs", () => {
     mod = getJiti()(safeSource) as OpenClawPluginModule;
     `;
     const result = patchLoaderTs(sourceWithLoadSource, minimalCtx);
-    // VFS bypass injected
-    expect(result).toContain('includes("$bunfs")');
+    // VFS bypass injected via origin check (works on all platforms)
+    expect(result).toContain('candidate.origin === "bundled"');
     expect(result).toContain("let safeSource: string;");
     // loadSource intermediate block preserved
     expect(result).toContain("loadSource");
@@ -137,7 +137,7 @@ describe("patchLoaderTs", () => {
     mod = getJiti()(safeSource) as OpenClawPluginModule;
     `;
     const result = patchLoaderTs(sourceWithoutLoadSource, minimalCtx);
-    expect(result).toContain('includes("$bunfs")');
+    expect(result).toContain('candidate.origin === "bundled"');
     expect(result).toContain("let safeSource: string;");
     expect(result).toContain("absolutePath: candidate.source,");
     expect(result).not.toContain("getJiti()(safeSource)");

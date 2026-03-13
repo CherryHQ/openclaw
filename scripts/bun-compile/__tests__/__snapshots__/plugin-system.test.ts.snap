@@ -12,11 +12,11 @@ exports[`patchDiscoveryTs > snapshot: patched discovery readPackageManifest bypa
 
 exports[`patchLoaderTs > snapshot: patched loader.ts boundary bypass region > loader-boundary-bypass 1`] = `
 "let safeSource: string;
-    if (candidate.rootDir.includes("$bunfs") || candidate.source.includes("$bunfs")) {
+    if (candidate.origin === "bundled") {
       safeSource = candidate.source;
     } else {
       const opened = openBoundaryFileSync({
-        absolutePath: candidate.source,
+        absolutePath: loadSource,
         rootPath: pluginRoot,
         boundaryLabel: "plugin root",
         rejectHardlinks: candidate.origin !== "bundled",
