@@ -84,6 +84,11 @@ if (
     if (isTruthyEnvValue(process.env.OPENCLAW_NO_RESPAWN)) {
       return false;
     }
+    // Bun doesn't need --disable-warning=ExperimentalWarning and doesn't
+    // recognize it as a valid flag, so skip the respawn entirely.
+    if ((process.versions as Record<string, string | undefined>)?.bun) {
+      return false;
+    }
     if (isTruthyEnvValue(process.env.OPENCLAW_NODE_OPTIONS_READY)) {
       return false;
     }

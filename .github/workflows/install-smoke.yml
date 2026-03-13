@@ -12,6 +12,7 @@ concurrency:
 
 jobs:
   docs-scope:
+    if: github.repository == 'openclaw/openclaw'
     runs-on: blacksmith-16vcpu-ubuntu-2404
     outputs:
       docs_only: ${{ steps.check.outputs.docs_only }}

@@ -1,0 +1,145 @@
+name: Sync Upstream Release
+
+on:
+  schedule:
+    # Check every hour for new upstream releases
+    - cron: "0 * * * *"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Upstream tag to sync (e.g. v2026.3.3). Leave empty for auto-detect."
+        type: string
+        required: false
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout fork main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Add upstream remote
+        run: |
+          git remote add upstream https://github.com/openclaw/openclaw.git || true
+          git fetch upstream --tags --force
+
+      - name: Determine target tag
+        id: target
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+
+          if [ -n "$INPUT_TAG" ]; then
+            TAG="$INPUT_TAG"
+            if ! git rev-parse "$TAG" >/dev/null 2>&1; then
+              echo "::error::Tag $TAG not found in upstream"
+              exit 1
+            fi
+            echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+            echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Find latest stable upstream tag (exclude beta/rc)
+          LATEST_TAG=$(git tag -l 'v*' --sort=-version:refname \
+            | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
+            | head -1)
+
+          if [ -z "$LATEST_TAG" ]; then
+            echo "::notice::No stable upstream tags found"
+            exit 0
+          fi
+
+          echo "Latest upstream stable tag: $LATEST_TAG"
+
+          # Check if we already have a release branch or tag for this version
+          BRANCH="release/${LATEST_TAG}"
+          if git ls-remote --heads origin "$BRANCH" | grep -q .; then
+            echo "::notice::Branch $BRANCH already exists, skipping"
+            exit 0
+          fi
+
+          if git tag -l "$LATEST_TAG" | grep -q . && git merge-base --is-ancestor "$LATEST_TAG" origin/main 2>/dev/null; then
+            echo "::notice::Tag $LATEST_TAG already merged into main, skipping"
+            exit 0
+          fi
+
+          echo "tag=$LATEST_TAG" >> "$GITHUB_OUTPUT"
+          echo "version=${LATEST_TAG#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Create release branch and merge upstream
+        if: steps.target.outputs.tag != ''
+        id: merge
+        env:
+          TAG: ${{ steps.target.outputs.tag }}
+        run: |
+          set -euo pipefail
+
+          BRANCH="release/${TAG}"
+          git checkout -b "$BRANCH" origin/main
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # Attempt merge
+          if git merge "$TAG" --no-edit -m "chore: merge upstream $TAG"; then
+            echo "conflict=false" >> "$GITHUB_OUTPUT"
+          else
+            # Mark conflicts but still commit
+            git add -A
+            git commit --no-edit -m "chore: merge upstream $TAG (conflicts)" || true
+            echo "conflict=true" >> "$GITHUB_OUTPUT"
+          fi
+
+          git push origin "$BRANCH"
+          echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
+
+      - name: Create Pull Request
+        if: steps.merge.outputs.branch != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.target.outputs.tag }}
+          VERSION: ${{ steps.target.outputs.version }}
+          BRANCH: ${{ steps.merge.outputs.branch }}
+          HAS_CONFLICT: ${{ steps.merge.outputs.conflict }}
+        run: |
+          set -euo pipefail
+
+          LABELS="release"
+          if [ "$HAS_CONFLICT" = "true" ]; then
+            # Ensure the label exists
+            gh label create "conflict" --color "D93F0B" --description "Merge conflict needs manual resolution" --force || true
+            LABELS="release,conflict"
+          fi
+
+          gh pr create \
+            --base main \
+            --head "$BRANCH" \
+            --title "release: sync upstream $TAG" \
+            --label "$LABELS" \
+            --body "$(cat <<EOF
+          ## Upstream Sync
+
+          Merges upstream [\`$TAG\`](https://github.com/openclaw/openclaw/releases/tag/$TAG) into fork main.
+
+          $(if [ "$HAS_CONFLICT" = "true" ]; then echo "**Has merge conflicts that need manual resolution.**"; else echo "Clean merge, ready to review."; fi)
+
+          ### After merge
+
+          A tag \`$TAG\` will be automatically created on merge, triggering the binary build workflow.
+
+          ### Checklist
+
+          - [ ] Merge conflicts resolved (if any)
+          - [ ] Smoke check: build scripts still work with upstream changes
+          EOF
+          )"

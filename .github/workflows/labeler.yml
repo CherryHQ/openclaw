@@ -20,6 +20,7 @@ permissions: {}
 
 jobs:
   label:
+    if: github.repository == 'openclaw/openclaw'
     permissions:
       contents: read
       pull-requests: write
