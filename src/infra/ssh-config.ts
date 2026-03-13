@@ -73,7 +73,6 @@ export async function resolveSshConfig(
   return await new Promise<SshResolvedConfig | null>((resolve) => {
     const child = spawn(sshPath, args, {
       stdio: ["ignore", "pipe", "ignore"],
-      windowsHide: true,
     });
     let stdout = "";
     child.stdout?.setEncoding("utf8");
