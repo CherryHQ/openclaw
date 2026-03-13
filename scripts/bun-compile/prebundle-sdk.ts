@@ -60,7 +60,10 @@ export async function bundlePluginSdk(
     root: resolve("src/plugin-sdk"),
     target: "bun",
     format: "esm",
-    minify: true,
+    // Minification disabled: Bun's bundler with splitting + minify generates
+    // invalid ESM chunks ("Exported binding 'x' needs to refer to a top-level
+    // declared variable"). SDK is embedded in VFS so minification is unnecessary.
+    minify: false,
     splitting: true,
     external: sdkExternals,
     plugins: [createNativeStubPlugin()],
