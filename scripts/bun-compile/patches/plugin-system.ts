@@ -92,7 +92,7 @@ export function patchLoaderTs(
       [
         `const pluginRoot = safeRealpathOrResolve(candidate.rootDir);`,
         `    let safeSource: string;`,
-        `    if (candidate.rootDir.includes("$bunfs") || candidate.source.includes("$bunfs")) {`,
+        `    if (candidate.origin === "bundled") {`,
         `      safeSource = candidate.source;`,
         `    } else {`,
         `      const opened = openBoundaryFileSync({`,
