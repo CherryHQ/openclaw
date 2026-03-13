@@ -31,10 +31,10 @@ describe("patchLoaderTs", () => {
     expect(result).toContain("__extractPluginSdk()");
   });
 
-  it("injects $bunfs VFS bypass for openBoundaryFileSync", () => {
+  it("injects origin check bypass for openBoundaryFileSync", () => {
     const source = readFileSync(resolve("src/plugins/loader.ts"), "utf-8");
     const result = patchLoaderTs(source, minimalCtx);
-    expect(result).toContain('includes("$bunfs")');
+    expect(result).toContain('candidate.origin === "bundled"');
   });
 
   it("injects Error.captureStackTrace patch", () => {
@@ -70,6 +70,98 @@ describe("patchLoaderTs", () => {
     expect(result).toContain("require(__bundleOut)");
     // Should NOT use jiti for any path in compiled binary
     expect(result).not.toContain("getJiti()(safeSource)");
+  });
+
+  // --- Regression: pattern 3 must tolerate upstream intermediate vars ---
+  it("handles loadSource intermediate variable between pluginRoot and openBoundaryFileSync", () => {
+    // Simulates the upstream code that inserts a loadSource variable
+    const sourceWithLoadSource = `
+    const pluginRoot = safeRealpathOrResolve(candidate.rootDir);
+    const loadSource =
+      (registrationMode === "setup-only" || registrationMode === "setup-runtime") &&
+      manifestRecord.setupSource
+        ? manifestRecord.setupSource
+        : candidate.source;
+    const opened = openBoundaryFileSync({
+      absolutePath: loadSource,
+      rootPath: pluginRoot,
+      boundaryLabel: "plugin root",
+      rejectHardlinks: candidate.origin !== "bundled",
+      skipLexicalRootCheck: true,
+    });
+    if (!opened.ok) {
+      pushPluginLoadError("plugin entry path escapes plugin root or fails alias checks");
+      continue;
+    }
+    const safeSource = opened.path;
+    fs.closeSync(opened.fd);
+
+    let mod = null;
+    mod = getJiti()(safeSource) as OpenClawPluginModule;
+    `;
+    const result = patchLoaderTs(sourceWithLoadSource, minimalCtx);
+    // VFS bypass injected via origin check (works on all platforms)
+    expect(result).toContain('candidate.origin === "bundled"');
+    expect(result).toContain("let safeSource: string;");
+    // loadSource intermediate block preserved
+    expect(result).toContain("loadSource");
+    expect(result).toContain("registrationMode");
+    // Uses the upstream absolutePath variable (loadSource), not hardcoded candidate.source
+    expect(result).toContain("absolutePath: loadSource,");
+    // jiti replaced
+    expect(result).not.toContain("getJiti()(safeSource)");
+  });
+
+  it("handles original code without loadSource intermediate variable", () => {
+    const sourceWithoutLoadSource = `
+    const pluginRoot = safeRealpathOrResolve(candidate.rootDir);
+    const opened = openBoundaryFileSync({
+      absolutePath: candidate.source,
+      rootPath: pluginRoot,
+      boundaryLabel: "plugin root",
+      rejectHardlinks: candidate.origin !== "bundled",
+      skipLexicalRootCheck: true,
+    });
+    if (!opened.ok) {
+      pushPluginLoadError("plugin entry path escapes plugin root or fails alias checks");
+      continue;
+    }
+    const safeSource = opened.path;
+    fs.closeSync(opened.fd);
+
+    let mod = null;
+    mod = getJiti()(safeSource) as OpenClawPluginModule;
+    `;
+    const result = patchLoaderTs(sourceWithoutLoadSource, minimalCtx);
+    expect(result).toContain('candidate.origin === "bundled"');
+    expect(result).toContain("let safeSource: string;");
+    expect(result).toContain("absolutePath: candidate.source,");
+    expect(result).not.toContain("getJiti()(safeSource)");
+  });
+
+  // --- Snapshot: full patched output for regression detection ---
+  it("snapshot: patched loader.ts boundary bypass region", () => {
+    const source = readFileSync(resolve("src/plugins/loader.ts"), "utf-8");
+    const result = patchLoaderTs(source, minimalCtx);
+    // Extract the patched region around the boundary bypass
+    const bypassStart = result.indexOf("let safeSource: string;");
+    const bypassEnd = result.indexOf("let mod:", bypassStart);
+    expect(bypassStart).toBeGreaterThan(-1);
+    expect(bypassEnd).toBeGreaterThan(bypassStart);
+    const region = result.slice(bypassStart, bypassEnd).trim();
+    expect(region).toMatchSnapshot("loader-boundary-bypass");
+  });
+
+  it("snapshot: patched loader.ts jiti replacement region", () => {
+    const source = readFileSync(resolve("src/plugins/loader.ts"), "utf-8");
+    const result = patchLoaderTs(source, minimalCtx);
+    // Extract the region from $bunfs check through the external plugin bundler
+    const jitiStart = result.indexOf('if (safeSource.includes("$bunfs")');
+    const jitiEnd = result.indexOf("} catch (err) {", jitiStart);
+    expect(jitiStart).toBeGreaterThan(-1);
+    expect(jitiEnd).toBeGreaterThan(jitiStart);
+    const region = result.slice(jitiStart, jitiEnd).trim();
+    expect(region).toMatchSnapshot("loader-jiti-replacement");
   });
 });
 
