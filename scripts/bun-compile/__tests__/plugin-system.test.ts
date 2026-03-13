@@ -35,7 +35,7 @@ describe("patchLoaderTs", () => {
     expect(result).toContain("__extractPluginSdk()");
   });
 
-  it("injects origin check bypass for openBoundaryFileSync", () => {
+  it("bypasses openBoundaryFileSync for bundled plugins via origin check", () => {
     const source = readFileSync(resolve("src/plugins/loader.ts"), "utf-8");
     const result = patchLoaderTs(source, minimalCtx);
     expect(result).toContain('candidate.origin === "bundled"');
