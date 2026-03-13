@@ -5,6 +5,7 @@ docker-compose.override.yml
 docker-compose.extra.yml
 dist
 dist-runtime
+dist-bun
 pnpm-lock.yaml
 bun.lock
 bun.lockb

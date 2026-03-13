@@ -15,6 +15,7 @@ permissions: {}
 
 jobs:
   auto-response:
+    if: github.repository == 'openclaw/openclaw'
     permissions:
       issues: write
       pull-requests: write

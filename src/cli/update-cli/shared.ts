@@ -8,7 +8,7 @@ import { readPackageName, readPackageVersion } from "../../infra/package-json.js
 import { normalizePackageTagInput } from "../../infra/package-tag.js";
 import { trimLogTail } from "../../infra/restart-sentinel.js";
 import { parseSemver } from "../../infra/runtime-guard.js";
-import { fetchNpmTagVersion } from "../../infra/update-check.js";
+import { fetchNpmTagVersion, isBinaryInstall } from "../../infra/update-check.js";
 import {
   canResolveRegistryVersionForPackageTarget,
   detectGlobalInstallManagerByPresence,
@@ -133,6 +133,9 @@ export function resolveNodeRunner(): string {
 }
 
 export async function resolveUpdateRoot(): Promise<string> {
+  if (isBinaryInstall()) {
+    return path.dirname(process.execPath);
+  }
   return (
     (await resolveOpenClawPackageRoot({
       moduleUrl: import.meta.url,
@@ -229,7 +232,7 @@ export async function ensureGitCheckout(params: {
 
 export async function resolveGlobalManager(params: {
   root: string;
-  installKind: "git" | "package" | "unknown";
+  installKind: "git" | "package" | "binary" | "unknown";
   timeoutMs: number;
 }): Promise<GlobalInstallManager> {
   const runCommand = createGlobalCommandRunner();
