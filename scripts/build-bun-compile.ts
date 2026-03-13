@@ -299,17 +299,6 @@ export async function readPackageName(_root) { return ${JSON.stringify(ctx.pkgJs
         );
         return { contents: src, loader: "ts" };
       });
-      // Patch workspace.ts: replace node:fs/promises with syncFs.promises so
-      // VFS monkey-patches on node:fs apply (node:fs/promises is a separate
-      // module object in Bun compiled binaries and cannot be reliably patched).
-      build.onLoad({ filter: /agents[/\\]workspace\.ts$/ }, (args) => {
-        let src = readFileSync(args.path, "utf-8");
-        src = src.replace(
-          'import fs from "node:fs/promises";',
-          "const fs = syncFs.promises;",
-        );
-        return { contents: src, loader: "ts" };
-      });
       // Patch workspace-templates to prefer VFS-embedded templates directory
       build.onLoad({ filter: /agents[/\\]workspace-templates\.ts$/ }, (args) => {
         let src = readFileSync(args.path, "utf-8");
