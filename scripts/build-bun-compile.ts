@@ -479,6 +479,21 @@ const compileOptions: Record<string, unknown> = { outfile };
 if (bunTarget) {
   compileOptions.target = bunTarget;
 }
+if (platform.os === "win32") {
+  const windowsOpts: Record<string, unknown> = {
+    hideConsole: false,
+    title: "OpenClaw",
+    publisher: "OpenClaw",
+    version: pkgJson.version,
+    description: "OpenClaw CLI",
+    copyright: `Copyright ${new Date().getFullYear()} OpenClaw`,
+  };
+  const icoPath = resolve("scripts", "openclaw.ico");
+  if (existsSync(icoPath)) {
+    windowsOpts.icon = icoPath;
+  }
+  compileOptions.windows = windowsOpts;
+}
 
 console.log(`[bun-compile] Building with Bun.build() JS API...`);
 
