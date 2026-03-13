@@ -88,28 +88,39 @@ export function patchLoaderTs(
     )
     // 3. For embedded extensions ($bunfs VFS paths), bypass openBoundaryFileSync
     .replace(
-      /const pluginRoot = safeRealpathOrResolve\(candidate\.rootDir\);\s*\n\s*const opened = openBoundaryFileSync\(\{[\s\S]*?\}\);\s*\n\s*if \(!opened\.ok\) \{\s*\n\s*pushPluginLoadError\([^)]+\);\s*\n\s*continue;\s*\n\s*\}\s*\n\s*const safeSource = opened\.path;\s*\n\s*fs\.closeSync\(opened\.fd\);/,
-      [
-        `const pluginRoot = safeRealpathOrResolve(candidate.rootDir);`,
-        `    let safeSource: string;`,
-        `    if (candidate.rootDir.includes("$bunfs") || candidate.source.includes("$bunfs")) {`,
-        `      safeSource = candidate.source;`,
-        `    } else {`,
-        `      const opened = openBoundaryFileSync({`,
-        `        absolutePath: candidate.source,`,
-        `        rootPath: pluginRoot,`,
-        `        boundaryLabel: "plugin root",`,
-        `        rejectHardlinks: candidate.origin !== "bundled",`,
-        `        skipLexicalRootCheck: true,`,
-        `      });`,
-        `      if (!opened.ok) {`,
-        `        pushPluginLoadError("plugin entry path escapes plugin root or fails alias checks");`,
-        `        continue;`,
-        `      }`,
-        `      safeSource = opened.path;`,
-        `      fs.closeSync(opened.fd);`,
-        `    }`,
-      ].join("\n"),
+      /const pluginRoot = safeRealpathOrResolve\(candidate\.rootDir\);[\s\S]*?const opened = openBoundaryFileSync\(\{[\s\S]*?\}\);\s*\n\s*if \(!opened\.ok\) \{\s*\n\s*pushPluginLoadError\([^)]+\);\s*\n\s*continue;\s*\n\s*\}\s*\n\s*const safeSource = opened\.path;\s*\n\s*fs\.closeSync\(opened\.fd\);/,
+      (match) => {
+        // Extract the block between pluginRoot and `const opened =` to preserve
+        // any intermediate statements (e.g. loadSource) added by upstream.
+        const openedIdx = match.indexOf("const opened = openBoundaryFileSync");
+        const afterPluginRoot = match.indexOf("\n", "const pluginRoot = safeRealpathOrResolve(candidate.rootDir);".length);
+        const intermediateBlock = match.slice(afterPluginRoot, openedIdx).trim();
+        // Detect what variable the openBoundaryFileSync uses for absolutePath
+        const absPathMatch = match.match(/absolutePath:\s*(\S+),/);
+        const absPathVar = absPathMatch?.[1] ?? "candidate.source";
+        return [
+          `const pluginRoot = safeRealpathOrResolve(candidate.rootDir);`,
+          ...(intermediateBlock ? [`    ${intermediateBlock}`] : []),
+          `    let safeSource: string;`,
+          `    if (candidate.origin === "bundled") {`,
+          `      safeSource = candidate.source;`,
+          `    } else {`,
+          `      const opened = openBoundaryFileSync({`,
+          `        absolutePath: ${absPathVar},`,
+          `        rootPath: pluginRoot,`,
+          `        boundaryLabel: "plugin root",`,
+          `        rejectHardlinks: candidate.origin !== "bundled",`,
+          `        skipLexicalRootCheck: true,`,
+          `      });`,
+          `      if (!opened.ok) {`,
+          `        pushPluginLoadError("plugin entry path escapes plugin root or fails alias checks");`,
+          `        continue;`,
+          `      }`,
+          `      safeSource = opened.path;`,
+          `      fs.closeSync(opened.fd);`,
+          `    }`,
+        ].join("\n");
+      },
     )
     // 4. Replace jiti with native loading for all plugin paths.
     //    - $bunfs/VFS extensions: read source via VFS, evaluate with new Function() CJS wrapper
