@@ -80,6 +80,7 @@ export class IMessageRpcClient {
     }
     const child = spawn(this.cliPath, args, {
       stdio: ["pipe", "pipe", "pipe"],
+      windowsHide: true,
     });
     this.child = child;
     this.reader = createInterface({ input: child.stdout });
