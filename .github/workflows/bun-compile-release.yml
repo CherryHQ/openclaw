@@ -233,6 +233,16 @@ jobs:
         run: |
           Compress-Archive -Path dist-bun\* -DestinationPath ${{ matrix.artifact }}.zip
 
+      # --- SHA256 checksum ---
+      - name: Generate SHA256 checksum
+        shell: bash
+        run: |
+          for f in ${{ matrix.artifact }}.tar.gz ${{ matrix.artifact }}.zip; do
+            if [ -f "$f" ]; then
+              shasum -a 256 "$f" > "$f.sha256"
+            fi
+          done
+
       # --- Upload artifact ---
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -240,7 +250,9 @@ jobs:
           name: ${{ matrix.artifact }}
           path: |
             ${{ matrix.artifact }}.tar.gz
+            ${{ matrix.artifact }}.tar.gz.sha256
             ${{ matrix.artifact }}.zip
+            ${{ matrix.artifact }}.zip.sha256
           retention-days: 7
 
       # --- Release (per build, immediately after success) ---
@@ -269,7 +281,9 @@ jobs:
           tag_name: ${{ steps.resolve-tag.outputs.tag }}
           files: |
             ${{ matrix.artifact }}.tar.gz
+            ${{ matrix.artifact }}.tar.gz.sha256
             ${{ matrix.artifact }}.zip
+            ${{ matrix.artifact }}.zip.sha256
           generate_release_notes: true
           draft: false
         env:
