@@ -108,9 +108,9 @@ function getCommandPathFromArgv(argv: string[]): string[] {
   return tokens;
 }
 
-function shouldSkipEagerContextWindowWarmup(argv: string[] = process.argv): boolean {
+function shouldEagerWarmContextWindowCache(argv: string[] = process.argv): boolean {
   const [primary, secondary] = getCommandPathFromArgv(argv);
-  return primary === "config" && secondary === "validate";
+  return !(primary === "config" && secondary === "validate");
 }
 
 function primeConfiguredContextWindows(): OpenClawConfig | undefined {
@@ -193,10 +193,9 @@ export function lookupContextTokens(modelId?: string): number | undefined {
   return MODEL_CACHE.get(modelId);
 }
 
-if (!shouldSkipEagerContextWindowWarmup()) {
-  // Keep prior behavior where model limits begin loading during startup.
-  // This avoids a cold-start miss on the first context token lookup.
-  void ensureContextWindowCacheLoaded();
+if (shouldEagerWarmContextWindowCache()) {
+  // Defer to microtask to avoid module init race in compiled binary.
+  queueMicrotask(() => void ensureContextWindowCacheLoaded());
 }
 
 function resolveConfiguredModelParams(
