@@ -194,9 +194,8 @@ export function lookupContextTokens(modelId?: string): number | undefined {
 }
 
 if (!shouldSkipEagerContextWindowWarmup()) {
-  // Keep prior behavior where model limits begin loading during startup.
-  // This avoids a cold-start miss on the first context token lookup.
-  void ensureContextWindowCacheLoaded();
+  // Defer to microtask to avoid module init race in compiled binary.
+  queueMicrotask(() => void ensureContextWindowCacheLoaded());
 }
 
 function resolveConfiguredModelParams(
