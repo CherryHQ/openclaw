@@ -240,9 +240,8 @@ export function lookupContextTokens(
 }
 
 if (shouldEagerWarmContextWindowCache()) {
-  // Keep startup warmth for the real CLI, but avoid import-time side effects
-  // when this module is pulled in through library/plugin-sdk surfaces.
-  void ensureContextWindowCacheLoaded();
+  // Defer to microtask to avoid module init race in compiled binary.
+  queueMicrotask(() => void ensureContextWindowCacheLoaded());
 }
 
 function resolveConfiguredModelParams(
