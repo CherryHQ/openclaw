@@ -51,7 +51,7 @@ export async function bundleExtensions(
   }
 
   // Collect extension dirs that have openclaw.plugin.json
-  const extDirs: { name: string; dir: string; entry: string }[] = [];
+  const extDirs: { name: string; dir: string; entry: string; setupEntry?: string }[] = [];
   for (const entry of readdirSync(extensionsDir, { withFileTypes: true })) {
     if (!entry.isDirectory()) {
       continue;
@@ -64,12 +64,20 @@ export async function bundleExtensions(
 
     const pkgPath = join(extDir, "package.json");
     let entryFile = "";
+    let setupEntryFile: string | undefined;
     if (existsSync(pkgPath)) {
       try {
         const pkg = JSON.parse(readFileSync(pkgPath, "utf-8"));
         const exts = pkg?.openclaw?.extensions;
         if (Array.isArray(exts) && exts.length > 0) {
           entryFile = resolve(extDir, exts[0]);
+        }
+        const se = pkg?.openclaw?.setupEntry;
+        if (typeof se === "string" && se.trim()) {
+          const resolved = resolve(extDir, se);
+          if (existsSync(resolved)) {
+            setupEntryFile = resolved;
+          }
         }
       } catch {
         // fall through
@@ -89,7 +97,7 @@ export async function bundleExtensions(
       continue;
     }
 
-    extDirs.push({ name: entry.name, dir: extDir, entry: entryFile });
+    extDirs.push({ name: entry.name, dir: extDir, entry: entryFile, setupEntry: setupEntryFile });
   }
 
   console.log(`[bun-compile] Bundling ${extDirs.length} extensions with Bun.build...`);
@@ -110,22 +118,26 @@ export async function bundleExtensions(
     const outDir = join(extTempDir, ext.name);
     mkdirSync(outDir, { recursive: true });
 
+    const bunBuildOpts = {
+      outdir: outDir,
+      target: "bun" as const,
+      format: "cjs" as const,
+      minify: false,
+      external: extExternals,
+      plugins: [createProtobufLongFixPlugin()],
+      loader: { ".node": "file" as const },
+      define: {
+        "import.meta.resolve": "require.resolve",
+      },
+    };
+
     try {
       // CJS format so extensions can be loaded with new Function() CJS wrapper
       // in the compiled binary (preserves require resolution from binary context).
       // define replaces import.meta.* which isn't valid inside CJS function wrapper.
       const bundleResult = await Bun.build({
         entrypoints: [ext.entry],
-        outdir: outDir,
-        target: "bun",
-        format: "cjs",
-        minify: false,
-        external: extExternals,
-        plugins: [createProtobufLongFixPlugin()],
-        loader: { ".node": "file" },
-        define: {
-          "import.meta.resolve": "require.resolve",
-        },
+        ...bunBuildOpts,
       });
 
       if (!bundleResult.success) {
@@ -145,13 +157,38 @@ export async function bundleExtensions(
     }
 
     const entryJsName = "index.js";
+    // Bundle setupEntry separately if present
+    if (ext.setupEntry) {
+      try {
+        const setupResult = await Bun.build({
+          entrypoints: [ext.setupEntry],
+          ...bunBuildOpts,
+        });
+        if (!setupResult.success) {
+          console.warn(
+            `[bun-compile] Extension ${ext.name}: setupEntry bundle failed, skipping setupEntry`,
+          );
+        }
+      } catch (err) {
+        console.warn(
+          `[bun-compile] Extension ${ext.name}: setupEntry bundle failed: ${String(err)}`,
+        );
+      }
+    }
 
-    // Copy package.json (with openclaw.extensions pointing to bundled .js)
+    // Copy package.json (with openclaw.extensions and setupEntry pointing to bundled .js)
     if (existsSync(join(ext.dir, "package.json"))) {
       try {
         const pkg = JSON.parse(readFileSync(join(ext.dir, "package.json"), "utf-8"));
         if (pkg.openclaw?.extensions) {
           pkg.openclaw.extensions = [`./${entryJsName}`];
+        }
+        if (pkg.openclaw?.setupEntry && ext.setupEntry) {
+          // Bun.build uses the entrypoint basename for output: setup-entry.ts → setup-entry.js
+          const bundledSetupName = ext.setupEntry.replace(/.*[/\\]/, "").replace(/\.ts$/, ".js");
+          if (existsSync(join(outDir, bundledSetupName))) {
+            pkg.openclaw.setupEntry = `./${bundledSetupName}`;
+          }
         }
         delete pkg.dependencies;
         writeFileSync(join(outDir, "package.json"), JSON.stringify(pkg, null, 2));
