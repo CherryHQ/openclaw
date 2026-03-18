@@ -15,6 +15,7 @@ function buildSdkPreamble(
   return [
     `import __sdkOs from "node:os";`,
     `import { createRequire as __bunCreateRequire } from "node:module";`,
+    `import { createPluginRuntime as __bundledCreatePluginRuntime } from "./runtime/index.js";`,
     // Error.captureStackTrace patch for Bun/JSC compatibility
     `{`,
     `  const __origCST = Error.captureStackTrace;`,
@@ -145,6 +146,17 @@ export function patchLoaderTs(
         `        const __cjsModule = { exports: {} as any };`,
         `        const __baseRequire = __bunCreateRequire(import.meta.url);`,
         `        const __sdkDistDir = (globalThis as any).__openclawSdkDist as string | undefined;`,
+        `        if (__sdkDistDir) {`,
+        `          __code = __code.replace(`,
+        `            /import\\s*\\(\\s*(['"])openclaw\\/plugin-sdk(?:\\/([^'"]+))?\\1\\s*\\)/g,`,
+        `            (_m: string, q: string, subpath: string | undefined) => {`,
+        `              const target = subpath`,
+        `                ? path.join(__sdkDistDir, subpath + ".js")`,
+        `                : path.join(__sdkDistDir, "index.js");`,
+        `              return \`import(\${q}\${target}\${q})\`;`,
+        `            },`,
+        `          );`,
+        `        }`,
         `        // Proxy require: redirect openclaw/plugin-sdk/* to extracted SDK dir`,
         `        const __cjsRequire = __sdkDistDir ? Object.assign(function __proxyRequire(id: string) {`,
         `          if (id === "openclaw/plugin-sdk" || id.startsWith("openclaw/plugin-sdk/")) {`,
@@ -201,6 +213,13 @@ export function patchLoaderTs(
         `          throw __extErr;`,
         `        }`,
         `      }`,
+      ].join("\n"),
+    )
+    .replace(
+      /const runtimeModulePath = resolvePluginRuntimeModulePath\(\);[\s\S]*?createPluginRuntimeFactory = runtimeModule\.createPluginRuntime;[\s\S]*?return createPluginRuntimeFactory;/,
+      [
+        `createPluginRuntimeFactory = __bundledCreatePluginRuntime;`,
+        `    return createPluginRuntimeFactory;`,
       ].join("\n"),
     );
 

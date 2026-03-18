@@ -1,6 +1,7 @@
 // Shared root plugin-sdk surface.
-// Keep this entry intentionally tiny. Channel/provider helpers belong on
-// dedicated subpaths or, for legacy consumers, the compat surface.
+// New plugins should still prefer dedicated subpaths, but the root entry keeps
+// a legacy-compatible helper set for external plugins that still import the
+// broad `openclaw/plugin-sdk` surface.
 
 export type {
   ChannelAccountSnapshot,
@@ -9,6 +10,7 @@ export type {
   ChannelCapabilities,
   ChannelGatewayContext,
   ChannelId,
+  ChannelLogSink,
   ChannelMessageActionAdapter,
   ChannelMessageActionContext,
   ChannelMessageActionName,
@@ -75,7 +77,7 @@ export type {
   TranscriptRewriteResult,
 } from "../context-engine/types.js";
 
-export { emptyPluginConfigSchema } from "../plugins/config-schema.js";
+export * from "./compat.js";
 export { registerContextEngine } from "../context-engine/registry.js";
 export { delegateCompactionToRuntime } from "../context-engine/delegate.js";
 export { onDiagnosticEvent } from "../infra/diagnostic-events.js";

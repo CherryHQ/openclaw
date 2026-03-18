@@ -44,6 +44,14 @@ describe("patchLoaderTs", () => {
     expect(result).toContain("__origCST");
   });
 
+  it("rewrites bundled dynamic plugin-sdk imports to extracted sdk paths", () => {
+    const source = readFileSync(resolve("src/plugins/loader.ts"), "utf-8");
+    const result = patchLoaderTs(source, minimalCtx);
+    expect(result).toContain("__code = __code.replace(");
+    expect(result).toContain("openclaw/plugin-sdk");
+    expect(result).toContain("return `import(${q}${target}${q})`;");
+  });
+
   it("uses new Function() CJS wrapper for $bunfs extensions", () => {
     const source = readFileSync(resolve("src/plugins/loader.ts"), "utf-8");
     const result = patchLoaderTs(source, minimalCtx);
@@ -54,6 +62,14 @@ describe("patchLoaderTs", () => {
     expect(result).toContain("new Function");
     expect(result).toContain("__cjsModule");
     expect(result).toContain("__bunCreateRequire");
+  });
+
+  it("uses bundled createPluginRuntime seam in compiled binary", () => {
+    const source = readFileSync(resolve("src/plugins/loader.ts"), "utf-8");
+    const result = patchLoaderTs(source, minimalCtx);
+    expect(result).toContain("__bundledCreatePluginRuntime");
+    expect(result).toContain("createPluginRuntimeFactory = __bundledCreatePluginRuntime");
+    expect(result).not.toContain("getJiti()(runtimeModulePath)");
   });
 
   it("bundles external plugins at load time (replaces jiti)", () => {

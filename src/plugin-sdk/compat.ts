@@ -22,10 +22,15 @@ export { resolveControlCommandGate } from "../channels/command-gating.js";
 export { delegateCompactionToRuntime } from "../context-engine/delegate.js";
 export type { DiagnosticEventPayload } from "../infra/diagnostic-events.js";
 export { onDiagnosticEvent } from "../infra/diagnostic-events.js";
+export { formatDocsLink } from "../terminal/links.js";
+export { DEFAULT_ACCOUNT_ID, normalizeAccountId } from "../routing/session-key.js";
+export { jsonResult, readStringParam } from "../agents/tools/common.js";
+export { buildChannelConfigSchema } from "../channels/plugins/config-schema.js";
 
 export { createAccountStatusSink } from "./channel-lifecycle.js";
 export { createPluginRuntimeStore } from "./runtime-store.js";
 export { KeyedAsyncQueue } from "./keyed-async-queue.js";
+export { extractToolSend } from "./tool-send.js";
 
 export {
   createHybridChannelConfigAdapter,
