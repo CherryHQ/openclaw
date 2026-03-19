@@ -70,6 +70,17 @@ export function patchLoaderTs(
   const preamble = buildSdkPreamble(ctx);
 
   const patched = source
+    // 0a. Remove static jiti import (jiti tries to find babel.cjs at init which breaks in $bunfs)
+    .replace(
+      /import \{ createJiti \} from "jiti";\n/,
+      ``,
+    )
+    // 0b. Remove lazy jiti loader (all loading is handled natively below).
+    // Handles both old (single jitiLoader) and new (jitiLoaders Map + tryNative) patterns.
+    .replace(
+      /\/\/ Lazy: avoid creating the Jiti loader.*?\n\s*(?:let jitiLoader:[\s\S]*?\n\s*return jitiLoader;\n\s*\};|const jitiLoaders = new Map[\s\S]*?\n\s*return loader;\n\s*\};)/,
+      `// jiti removed — Bun compiled binary uses native loading`,
+    )
     // 1. Replace modulePath default from fileURLToPath to process.execPath (both occurrences)
     .replace(
       /fileURLToPath\(import\.meta\.url\)/g,
@@ -129,7 +140,7 @@ export function patchLoaderTs(
     //    - External extensions: use Bun's native require() directly (handles TS/ESM/CJS)
     //    No jiti needed in compiled binary — Bun runtime handles everything natively.
     .replace(
-      /mod = getJiti\(\)\(safeSource\) as OpenClawPluginModule;/,
+      /mod = getJiti\((?:safeSource)?\)\(safeSource\) as OpenClawPluginModule;/,
       [
         `if (safeSource.includes("$bunfs") || safeSource.includes("__extensions__")) {`,
         `        const __vfsR = (globalThis as any).__vfsResolve as ((p: string) => string | null) | undefined;`,

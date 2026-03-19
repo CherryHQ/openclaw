@@ -69,7 +69,18 @@ describe("patchLoaderTs", () => {
     const result = patchLoaderTs(source, minimalCtx);
     expect(result).toContain("__bundledCreatePluginRuntime");
     expect(result).toContain("createPluginRuntimeFactory = __bundledCreatePluginRuntime");
-    expect(result).not.toContain("getJiti()(runtimeModulePath)");
+    expect(result).not.toContain("getJiti(runtimeModulePath)(runtimeModulePath)");
+  });
+
+  it("strips jiti import and getJiti function to prevent babel.cjs resolution failure", () => {
+    const source = readFileSync(resolve("src/plugins/loader.ts"), "utf-8");
+    const result = patchLoaderTs(source, minimalCtx);
+    // Static import must be removed (jiti tries to find babel.cjs at init in $bunfs)
+    expect(result).not.toContain('from "jiti"');
+    // Lazy loader function must be removed
+    expect(result).not.toContain("createJiti(import.meta.url");
+    expect(result).not.toContain("jitiLoaders");
+    expect(result).not.toContain("let jitiLoader");
   });
 
   it("bundles external plugins at load time (replaces jiti)", () => {
@@ -85,6 +96,7 @@ describe("patchLoaderTs", () => {
     // Loads the bundled output
     expect(result).toContain("require(__bundleOut)");
     // Should NOT use jiti for any path in compiled binary
+    expect(result).not.toContain("getJiti(safeSource)(safeSource)");
     expect(result).not.toContain("getJiti()(safeSource)");
   });
 

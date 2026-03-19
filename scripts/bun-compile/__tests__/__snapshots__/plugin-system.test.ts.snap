@@ -47,6 +47,17 @@ exports[`patchLoaderTs > snapshot: patched loader.ts jiti replacement region > l
         const __cjsModule = { exports: {} as any };
         const __baseRequire = __bunCreateRequire(import.meta.url);
         const __sdkDistDir = (globalThis as any).__openclawSdkDist as string | undefined;
+        if (__sdkDistDir) {
+          __code = __code.replace(
+            /import\\s*\\(\\s*(['"])openclaw\\/plugin-sdk(?:\\/([^'"]+))?\\1\\s*\\)/g,
+            (_m: string, q: string, subpath: string | undefined) => {
+              const target = subpath
+                ? path.join(__sdkDistDir, subpath + ".js")
+                : path.join(__sdkDistDir, "index.js");
+              return \`import(\${q}\${target}\${q})\`;
+            },
+          );
+        }
         // Proxy require: redirect openclaw/plugin-sdk/* to extracted SDK dir
         const __cjsRequire = __sdkDistDir ? Object.assign(function __proxyRequire(id: string) {
           if (id === "openclaw/plugin-sdk" || id.startsWith("openclaw/plugin-sdk/")) {
