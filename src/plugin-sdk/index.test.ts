@@ -1,8 +1,24 @@
+import { execFile } from "node:child_process";
 import fs from "node:fs/promises";
+import { createRequire } from "node:module";
+import os from "node:os";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
+import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
-import { buildPluginSdkPackageExports } from "./entrypoints.js";
+import {
+  buildPluginSdkEntrySources,
+  buildPluginSdkPackageExports,
+  buildPluginSdkSpecifiers,
+  pluginSdkEntrypoints,
+} from "./entrypoints.js";
 import * as sdk from "./index.js";
+
+const require = createRequire(import.meta.url);
+const pluginSdkSpecifiers = buildPluginSdkSpecifiers();
+const execFileAsync = promisify(execFile);
+
+const tsdownModuleUrl = pathToFileURL(require.resolve("tsdown")).href;
 
 describe("plugin-sdk exports", () => {
   it("does not expose runtime modules", () => {
