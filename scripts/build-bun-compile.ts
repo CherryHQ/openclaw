@@ -43,6 +43,7 @@ import {
 import {
   generatePtyUtilsContents,
   generateSharpLibContents,
+  generateSharpIndexESM,
   generateSqliteVecRuntime,
   generateOptionalStub,
 } from "./bun-compile/patches/native-embeds.js";
@@ -150,6 +151,12 @@ function createNativeEmbedPlugin(ctx: PatchContext): BunPlugin {
       if (ctx.sharpNodeFile) {
         build.onLoad({ filter: /sharp[/\\]lib[/\\]sharp\.js$/ }, () => ({
           contents: generateSharpLibContents(jsPath(ctx.sharpNodeFile!)),
+          loader: "js",
+        }));
+        // Replace sharp's CJS index.js with ESM to avoid Bun's CJS .default
+        // interop bug (same pattern as the protobufjs Long fix).
+        build.onLoad({ filter: /sharp[/\\]lib[/\\]index\.js$/ }, () => ({
+          contents: generateSharpIndexESM(),
           loader: "js",
         }));
       }

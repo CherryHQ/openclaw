@@ -28,6 +28,40 @@ export function generateSharpLibContents(sharpNodePath: string): string {
   return `module.exports = require("${safePath}");\n`;
 }
 
+/**
+ * ESM replacement for sharp/lib/index.js.
+ *
+ * Two issues with bundling sharp's CJS index.js in Bun compiled binaries:
+ * 1. Bun wraps CJS module.exports as { default: ... } when transpiling to ESM,
+ *    breaking require() chains (same as protobufjs Long fix).
+ * 2. sharp/lib/utility.js calls detect-libc at module level, but detect-libc
+ *    is stubbed as an optional external on non-macOS — causing a throw that
+ *    prevents module.exports = Sharp from being reached.
+ *
+ * Fix: ESM imports (Bun handles correctly), skip utility.js (detect-libc
+ * throws) and colour.js (@img/colour may be unresolvable). These provide
+ * concurrency tuning and colour-space transforms — not needed for our
+ * resize/rotate/metadata/jpeg/png pipeline.
+ */
+export function generateSharpIndexESM(): string {
+  return `
+import Sharp from './constructor.js';
+import input from './input.js';
+import resize from './resize.js';
+import composite from './composite.js';
+import operation from './operation.js';
+import channel from './channel.js';
+import output from './output.js';
+input(Sharp);
+resize(Sharp);
+composite(Sharp);
+operation(Sharp);
+channel(Sharp);
+output(Sharp);
+export default Sharp;
+`;
+}
+
 export function generateSqliteVecRuntime(
   extSuffix: string,
   format: "cjs" | "esm",

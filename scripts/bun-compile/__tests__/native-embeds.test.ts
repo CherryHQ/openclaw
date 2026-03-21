@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   generatePtyUtilsContents,
   generateSharpLibContents,
+  generateSharpIndexESM,
   generateSqliteVecRuntime,
   generateOptionalStub,
 } from "../patches/native-embeds.js";
@@ -20,6 +21,24 @@ describe("generateSharpLibContents", () => {
     const result = generateSharpLibContents("/path/to/sharp.node");
     expect(result).toContain('require("/path/to/sharp.node")');
     expect(result).toContain("module.exports");
+  });
+});
+
+describe("generateSharpIndexESM", () => {
+  it("uses ESM imports for core sharp sub-modules", () => {
+    const result = generateSharpIndexESM();
+    expect(result).toContain("import Sharp from './constructor.js'");
+    expect(result).toContain("import input from './input.js'");
+    expect(result).toContain("import output from './output.js'");
+    expect(result).toContain("export default Sharp");
+    expect(result).not.toContain("require(");
+    expect(result).not.toContain("module.exports");
+  });
+
+  it("skips utility.js and colour.js (fragile runtime deps)", () => {
+    const result = generateSharpIndexESM();
+    expect(result).not.toContain("utility");
+    expect(result).not.toContain("colour");
   });
 });
 
