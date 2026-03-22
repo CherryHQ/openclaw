@@ -6,7 +6,8 @@ import type {
   Request,
   Response,
 } from "playwright-core";
-import { chromium } from "playwright-core";
+import playwright from "playwright-core";
+const { chromium } = playwright;
 import { formatErrorMessage } from "../infra/errors.js";
 import type { SsrFPolicy } from "../infra/net/ssrf.js";
 import { withNoProxyForCdpUrl } from "./cdp-proxy-bypass.js";
