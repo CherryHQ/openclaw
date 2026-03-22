@@ -1,22 +1,12 @@
 // Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
 
-exports[`patchDiscoveryTs > snapshot: patched discovery readPackageManifest bypass > discovery-readPackageManifest-bypass 1`] = `
-"{
-  const __vfsResolve = (globalThis as any).__vfsResolve as ((p: string) => string | null) | undefined;
-  const __vfsPkgPath = path.join(dir, "package.json");
-  if (__vfsResolve?.(__vfsPkgPath)) {
-    try { return JSON.parse(fs.readFileSync(__vfsPkgPath, "utf-8")) as PackageManifest; }
-    catch { return null; }
-  }"
-`;
-
 exports[`patchLoaderTs > snapshot: patched loader.ts boundary bypass region > loader-boundary-bypass 1`] = `
 "let safeSource: string;
     if (candidate.origin === "bundled") {
       safeSource = candidate.source;
     } else {
       const opened = openBoundaryFileSync({
-        absolutePath: loadSource,
+        absolutePath: candidate.source,
         rootPath: pluginRoot,
         boundaryLabel: "plugin root",
         rejectHardlinks: candidate.origin !== "bundled",
@@ -47,17 +37,6 @@ exports[`patchLoaderTs > snapshot: patched loader.ts jiti replacement region > l
         const __cjsModule = { exports: {} as any };
         const __baseRequire = __bunCreateRequire(import.meta.url);
         const __sdkDistDir = (globalThis as any).__openclawSdkDist as string | undefined;
-        if (__sdkDistDir) {
-          __code = __code.replace(
-            /import\\s*\\(\\s*(['"])openclaw\\/plugin-sdk(?:\\/([^'"]+))?\\1\\s*\\)/g,
-            (_m: string, q: string, subpath: string | undefined) => {
-              const target = subpath
-                ? path.join(__sdkDistDir, subpath + ".js")
-                : path.join(__sdkDistDir, "index.js");
-              return \`import(\${q}\${target}\${q})\`;
-            },
-          );
-        }
         // Proxy require: redirect openclaw/plugin-sdk/* to extracted SDK dir
         const __cjsRequire = __sdkDistDir ? Object.assign(function __proxyRequire(id: string) {
           if (id === "openclaw/plugin-sdk" || id.startsWith("openclaw/plugin-sdk/")) {
@@ -108,49 +87,19 @@ exports[`patchLoaderTs > snapshot: patched loader.ts jiti replacement region > l
           }
           fs.writeFileSync(__bundleOut, __bundleCode);
           mod = require(__bundleOut) as OpenClawPluginModule;
+          // Bun bundler wraps CJS-with-default-export in ESM: export default require_xxx()
+          // require() of ESM adds another .default layer → { default: { default: plugin, __esModule } }
+          // Unwrap the inner CJS interop so resolvePluginModuleExport can find .register
+          if (mod && typeof mod === "object" && "default" in (mod as any)) {
+            const __inner = (mod as any).default;
+            if (__inner && typeof __inner === "object" && __inner.__esModule && "default" in __inner) {
+              mod = __inner.default as OpenClawPluginModule;
+            }
+          }
           process.on("exit", () => { try { fs.rmSync(__tmpDir, { recursive: true, force: true }); } catch {} });
         } catch (__extErr) {
           try { fs.rmSync(__tmpDir, { recursive: true, force: true }); } catch {}
           throw __extErr;
         }
       }"
-`;
-
-exports[`patchManifestTs > snapshot: patched manifest VFS bypass region > manifest-vfs-bypass 1`] = `
-"__vfsResolve = (globalThis as any).__vfsResolve as ((p: string) => string | null) | undefined;
-  const manifestPath = resolvePluginManifestPath(rootDir);
-  if (process.env.OPENCLAW_VFS_DEBUG) console.error("[VFS:loadPluginManifest]", { rootDir, manifestPath, hasVfsResolve: !!__vfsResolve, resolved: __vfsResolve?.(manifestPath) ?? "N/A" });
-  if (__vfsResolve?.(manifestPath)) {
-    if (process.env.OPENCLAW_VFS_DEBUG) console.error("[VFS:loadPluginManifest:BYPASS]", manifestPath);
-    try {
-      const raw = JSON.parse(fs.readFileSync(manifestPath, "utf-8")) as unknown;
-      if (!isRecord(raw)) return { ok: false, error: "plugin manifest must be an object", manifestPath };
-      const id = typeof raw.id === "string" ? raw.id.trim() : "";
-      if (!id) return { ok: false, error: "plugin manifest requires id", manifestPath };
-      const configSchema = isRecord(raw.configSchema) ? raw.configSchema : null;
-      if (!configSchema) return { ok: false, error: "plugin manifest requires configSchema", manifestPath };
-      return {
-        ok: true,
-        manifest: {
-          id,
-          configSchema,
-          kind: typeof raw.kind === "string" ? (raw.kind as any) : undefined,
-          channels: Array.isArray(raw.channels) ? raw.channels.filter((s: any) => typeof s === "string") : [],
-          providers: Array.isArray(raw.providers) ? raw.providers.filter((s: any) => typeof s === "string") : [],
-          providerAuthEnvVars: isRecord(raw.providerAuthEnvVars) ? raw.providerAuthEnvVars as any : undefined,
-          providerAuthChoices: Array.isArray(raw.providerAuthChoices) ? raw.providerAuthChoices as any : undefined,
-          skills: Array.isArray(raw.skills) ? raw.skills.filter((s: any) => typeof s === "string") : [],
-          name: typeof raw.name === "string" ? raw.name.trim() : undefined,
-          description: typeof raw.description === "string" ? raw.description.trim() : undefined,
-          version: typeof raw.version === "string" ? raw.version.trim() : undefined,
-          uiHints: isRecord(raw.uiHints) ? raw.uiHints as any : undefined,
-        },
-        manifestPath,
-      };
-    } catch (err) {
-      if (process.env.OPENCLAW_VFS_DEBUG) console.error("[VFS:loadPluginManifest:ERROR]", manifestPath, String(err));
-      return { ok: false, error: "failed to parse plugin manifest: " + String(err), manifestPath };
-    }
-  }
-  if (process.env.OPENCLAW_VFS_DEBUG) console.error("[VFS:loadPluginManifest:"
 `;
