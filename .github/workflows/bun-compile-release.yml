@@ -1,0 +1,301 @@
+name: Bun Compile Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      create-release:
+        description: Create a GitHub release with the latest tag
+        type: boolean
+        default: true
+      skip-smoke:
+        description: Skip smoke tests after build
+        type: boolean
+        default: false
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: bun-compile-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # macOS
+          - os: darwin
+            arch: arm64
+            runner: macos-latest
+            target: bun-darwin-arm64
+            artifact: openclaw-darwin-arm64
+            binary: openclaw
+          - os: darwin
+            arch: x64
+            runner: macos-latest
+            target: bun-darwin-x64
+            artifact: openclaw-darwin-x64
+            binary: openclaw
+            skip-smoke: true
+
+          # Linux
+          - os: linux
+            arch: x64
+            runner: ubuntu-latest
+            target: bun-linux-x64
+            artifact: openclaw-linux-x64
+            binary: openclaw
+          - os: linux
+            arch: arm64
+            runner: ubuntu-latest
+            target: bun-linux-arm64
+            artifact: openclaw-linux-arm64
+            binary: openclaw
+            cross: true
+
+          # Windows
+          - os: win32
+            arch: x64
+            runner: windows-latest
+            target: bun-windows-x64
+            artifact: openclaw-windows-x64
+            binary: openclaw.exe
+          - os: win32
+            arch: arm64
+            runner: windows-arm64
+            target: bun-windows-arm64
+            artifact: openclaw-windows-arm64
+            binary: openclaw.exe
+
+    runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: true
+          fetch-depth: 0
+
+      # --- Node + pnpm ---
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22.x
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: "10.23.0"
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.10"
+
+      - name: Runtime versions
+        run: |
+          node -v
+          pnpm -v
+          bun -v
+
+      - name: Get pnpm store directory
+        if: matrix.runner != 'windows-arm64'
+        id: pnpm-cache
+        shell: bash
+        run: echo "STORE_PATH=$(pnpm store path --silent)" >> $GITHUB_OUTPUT
+
+      - name: Restore pnpm cache
+        if: matrix.runner != 'windows-arm64'
+        id: pnpm-cache-restore
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ steps.pnpm-cache.outputs.STORE_PATH }}
+          key: ${{ runner.os }}-${{ matrix.arch }}-pnpm-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ matrix.arch }}-pnpm-
+
+      - name: Install dependencies
+        run: |
+          pnpm install --frozen-lockfile --ignore-scripts=false --config.engine-strict=false --config.enable-pre-post-scripts=true
+          # For cross-compile jobs, also fetch target-arch optional native deps
+          if [ "${{ matrix.cross }}" = "true" ] || [ "${{ matrix.skip-smoke }}" = "true" ]; then
+            pnpm install --frozen-lockfile --config.engine-strict=false \
+              --config.supportedArchitectures.cpu='["current","${{ matrix.arch }}"]' \
+              --config.supportedArchitectures.os='["current","${{ matrix.os }}"]'
+          fi
+
+      - name: Save pnpm cache
+        if: matrix.runner != 'windows-arm64' && steps.pnpm-cache-restore.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ steps.pnpm-cache.outputs.STORE_PATH }}
+          key: ${{ runner.os }}-${{ matrix.arch }}-pnpm-${{ hashFiles('**/pnpm-lock.yaml') }}
+
+      # --- Pre-build assets ---
+      - name: Build Control UI
+        run: pnpm ui:build
+
+      # --- Bun compile ---
+      - name: Build binary (${{ matrix.os }}-${{ matrix.arch }})
+        run: |
+          ARGS=(--target "${{ matrix.target }}" --outdir "dist-bun")
+          if [ "${{ matrix.cross }}" = "true" ]; then
+            ARGS+=(--skip-native)
+          fi
+          bun scripts/build-bun-compile.ts "${ARGS[@]}"
+
+      # --- macOS: import certificate, codesign, notarize ---
+      - name: Import signing certificate (macOS)
+        if: matrix.os == 'darwin' && env.MACOS_CERTIFICATE_BASE64 != ''
+        env:
+          MACOS_CERTIFICATE_BASE64: ${{ secrets.MACOS_CERTIFICATE_BASE64 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+        run: |
+          CERT_FILE=$(mktemp /tmp/cert-${{ matrix.arch }}-XXXXXX.p12)
+          KEYCHAIN_FILE=$(mktemp -u /tmp/keychain-${{ matrix.arch }}-XXXXXX.keychain-db)
+          KEYCHAIN_PASSWORD=$(openssl rand -hex 16)
+
+          echo "$MACOS_CERTIFICATE_BASE64" | base64 --decode > "$CERT_FILE"
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_FILE"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_FILE"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_FILE"
+          security import "$CERT_FILE" -P "$MACOS_CERTIFICATE_PASSWORD" \
+            -A -t cert -f pkcs12 -k "$KEYCHAIN_FILE"
+          security set-key-partition-list -S apple-tool:,apple: \
+            -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_FILE"
+          security list-keychains -d user -s "$KEYCHAIN_FILE" $(security list-keychains -d user | tr -d '"')
+
+          echo "KEYCHAIN_FILE=$KEYCHAIN_FILE" >> "$GITHUB_ENV"
+          rm -f "$CERT_FILE"
+
+      - name: Codesign binary (macOS)
+        if: matrix.os == 'darwin'
+        env:
+          SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY || '-' }}
+        run: |
+          codesign --force --options runtime \
+            --entitlements scripts/entitlements.plist \
+            --sign "$SIGN_IDENTITY" \
+            dist-bun/${{ matrix.binary }}
+          codesign --verify --verbose dist-bun/${{ matrix.binary }}
+
+      - name: Notarize binary (macOS)
+        if: matrix.os == 'darwin' && env.APPLE_ID != ''
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_ID_PASSWORD: ${{ secrets.APPLE_ID_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          # notarytool requires a zip/dmg/pkg — zip the binary for submission
+          NOTARY_ZIP=$(mktemp /tmp/notarize.XXXXXX.zip)
+          ditto -c -k --keepParent dist-bun/${{ matrix.binary }} "$NOTARY_ZIP"
+
+          xcrun notarytool submit "$NOTARY_ZIP" \
+            --apple-id "$APPLE_ID" \
+            --password "$APPLE_ID_PASSWORD" \
+            --team-id "$APPLE_TEAM_ID" \
+            --wait
+
+          rm -f "$NOTARY_ZIP"
+
+      - name: Cleanup keychain (macOS)
+        if: matrix.os == 'darwin' && always()
+        run: |
+          if [ -n "${KEYCHAIN_FILE:-}" ] && [ -f "${KEYCHAIN_FILE:-}" ]; then
+            security delete-keychain "$KEYCHAIN_FILE" || true
+          fi
+
+      # --- Smoke test (native builds only) ---
+      - name: Smoke test
+        if: matrix.cross != true && matrix.skip-smoke != true && inputs.skip-smoke != true
+        run: |
+          ./dist-bun/${{ matrix.binary }} --version
+        timeout-minutes: 1
+
+      # --- Package ---
+      - name: Package (tar.gz)
+        if: matrix.os != 'win32'
+        run: |
+          tar -czf ${{ matrix.artifact }}.tar.gz -C dist-bun .
+
+      - name: Package (zip, Windows)
+        if: matrix.os == 'win32'
+        shell: pwsh
+        run: |
+          Compress-Archive -Path dist-bun\* -DestinationPath ${{ matrix.artifact }}.zip
+
+      # --- Upload artifact ---
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: |
+            ${{ matrix.artifact }}.tar.gz
+            ${{ matrix.artifact }}.zip
+          retention-days: 7
+
+      # --- Release (per build, immediately after success) ---
+      - name: Fetch upstream tags (for tag lookup)
+        if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.create-release)
+        run: |
+          git fetch https://github.com/openclaw/openclaw.git --tags 2>/dev/null || true
+
+      - name: Resolve release tag
+        if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.create-release)
+        id: resolve-tag
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG=$(git describe --tags --abbrev=0 --match 'v*')
+          else
+            TAG="${{ github.ref_name }}"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Release tag: $TAG"
+
+      - name: Check existing release
+        if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.create-release)
+        id: check-release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ steps.resolve-tag.outputs.tag }}"
+          if gh release view "$TAG" --json isDraft --jq '.isDraft' 2>/dev/null; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Upload assets to existing release
+        if: (startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.create-release)) && steps.check-release.outputs.exists == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          TAG="${{ steps.resolve-tag.outputs.tag }}"
+          for f in ${{ matrix.artifact }}.tar.gz ${{ matrix.artifact }}.zip; do
+            [ -f "$f" ] && gh release upload "$TAG" "$f" --clobber
+          done
+
+      - name: Create release and upload assets
+        if: (startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.create-release)) && steps.check-release.outputs.exists != 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.resolve-tag.outputs.tag }}
+          files: |
+            ${{ matrix.artifact }}.tar.gz
+            ${{ matrix.artifact }}.zip
+          generate_release_notes: true
+          draft: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

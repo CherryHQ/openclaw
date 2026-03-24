@@ -1,4 +1,5 @@
-import { devices as playwrightDevices } from "playwright-core";
+import playwright from "playwright-core";
+const { devices: playwrightDevices } = playwright;
 import { ensurePageState, getPageForTargetId } from "./pw-session.js";
 import { withPageScopedCdpClient } from "./pw-session.page-cdp.js";
 

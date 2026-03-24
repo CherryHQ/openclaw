@@ -1,0 +1,105 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`patchLoaderTs > snapshot: patched loader.ts boundary bypass region > loader-boundary-bypass 1`] = `
+"let safeSource: string;
+    if (candidate.origin === "bundled") {
+      safeSource = candidate.source;
+    } else {
+      const opened = openBoundaryFileSync({
+        absolutePath: candidate.source,
+        rootPath: pluginRoot,
+        boundaryLabel: "plugin root",
+        rejectHardlinks: candidate.origin !== "bundled",
+        skipLexicalRootCheck: true,
+      });
+      if (!opened.ok) {
+        pushPluginLoadError("plugin entry path escapes plugin root or fails alias checks");
+        continue;
+      }
+      safeSource = opened.path;
+      fs.closeSync(opened.fd);
+    }"
+`;
+
+exports[`patchLoaderTs > snapshot: patched loader.ts jiti replacement region > loader-jiti-replacement 1`] = `
+"if (safeSource.includes("$bunfs") || safeSource.includes("__extensions__")) {
+        const __vfsR = (globalThis as any).__vfsResolve as ((p: string) => string | null) | undefined;
+        const __realPath = __vfsR?.(safeSource) ?? safeSource;
+        let __code = fs.readFileSync(__realPath, "utf-8");
+        // Bun CJS output wraps code in (function(exports,require,module,__filename,__dirname){...})
+        // Strip the wrapper so new Function() can execute the inner code directly.
+        const __bunCjsMatch = __code.match(/^[\\s\\S]*?\\(function\\s*\\(exports,\\s*require,\\s*module,\\s*__filename,\\s*__dirname\\)\\s*\\{/);
+        if (__bunCjsMatch) {
+          __code = __code.slice(__bunCjsMatch[0].length);
+          const __lastParen = __code.lastIndexOf("})");
+          if (__lastParen !== -1) __code = __code.slice(0, __lastParen);
+        }
+        const __cjsModule = { exports: {} as any };
+        const __baseRequire = __bunCreateRequire(import.meta.url);
+        const __sdkDistDir = (globalThis as any).__openclawSdkDist as string | undefined;
+        // Proxy require: redirect openclaw/plugin-sdk/* to extracted SDK dir
+        const __cjsRequire = __sdkDistDir ? Object.assign(function __proxyRequire(id: string) {
+          if (id === "openclaw/plugin-sdk" || id.startsWith("openclaw/plugin-sdk/")) {
+            const sub = id === "openclaw/plugin-sdk" ? "index.js" : id.slice("openclaw/plugin-sdk/".length) + ".js";
+            return __baseRequire(path.join(__sdkDistDir, sub));
+          }
+          return __baseRequire(id);
+        }, { resolve: __baseRequire.resolve }) : __baseRequire;
+        const __cjsFn = new Function("module", "exports", "require", "__filename", "__dirname", __code);
+        __cjsFn(__cjsModule, __cjsModule.exports, __cjsRequire, __realPath, path.dirname(__realPath));
+        mod = __cjsModule.exports as OpenClawPluginModule;
+      } else {
+        // External plugins: Bun compiled binary cannot resolve node_modules from
+        // external file paths (confirmed bug). Workaround: spawn ourselves in
+        // __OPENCLAW_BUNDLE_MODE to run Bun.build() and bundle all npm deps into
+        // a single file, then post-process to rewrite openclaw/plugin-sdk paths.
+        const __sdkDist = (globalThis as any).__openclawSdkDist as string | undefined;
+        const __pluginRoot = candidate.rootDir;
+        const __tmpDir = path.join(__sdkOs.tmpdir(), "openclaw-ext-" + pluginId + "-" + process.pid);
+        try {
+          fs.mkdirSync(__tmpDir, { recursive: true });
+          const __bundleOut = path.join(__tmpDir, "bundle.js");
+          // Spawn ourselves in bundler mode — the compiled binary IS bun
+          const { spawnSync: __spawnSync } = require("node:child_process") as typeof import("node:child_process");
+          const __buildResult = __spawnSync(process.execPath, [], {
+            cwd: __pluginRoot,
+            encoding: "utf-8",
+            timeout: 30000,
+            env: Object.assign({}, process.env, {
+              ["__OPENCLAW_BUNDLE_MODE"]: "1",
+              ["__OPENCLAW_BUNDLE_ENTRY"]: safeSource,
+              ["__OPENCLAW_BUNDLE_OUTFILE"]: __bundleOut,
+              ["__OPENCLAW_BUNDLE_CWD"]: __pluginRoot,
+            }),
+          });
+          if (__buildResult.status !== 0) throw new Error("bun build failed: " + (__buildResult.stderr || "unknown error").slice(0, 500));
+          // Post-process: rewrite openclaw/plugin-sdk imports to absolute SDK paths
+          let __bundleCode = fs.readFileSync(__bundleOut, "utf-8");
+          if (__sdkDist) {
+            __bundleCode = __bundleCode.replace(
+              /(?:from\\s+|require\\s*\\(\\s*|import\\s*\\(\\s*)(["'])openclaw\\/plugin-sdk(?:\\/([^"']+))?\\1/g,
+              (m: string, q: string, subpath: string | undefined) => {
+                const target = subpath ? path.join(__sdkDist, subpath + ".js") : path.join(__sdkDist, "index.js");
+                const prefix = m.startsWith("from") ? "from " : m.startsWith("require") ? "require(" : "import(";
+                return prefix + q + target + q;
+              },
+            );
+          }
+          fs.writeFileSync(__bundleOut, __bundleCode);
+          mod = require(__bundleOut) as OpenClawPluginModule;
+          // Bun bundler wraps CJS-with-default-export in ESM: export default require_xxx()
+          // require() of ESM adds another .default layer → { default: { default: plugin, __esModule } }
+          // Unwrap the inner CJS interop so resolvePluginModuleExport can find .register
+          if (mod && typeof mod === "object" && "default" in (mod as any)) {
+            const __inner = (mod as any).default;
+            if (__inner && typeof __inner === "object" && __inner.__esModule && "default" in __inner) {
+              mod = __inner.default as OpenClawPluginModule;
+            }
+          }
+          process.on("exit", () => { try { fs.rmSync(__tmpDir, { recursive: true, force: true }); } catch {} });
+        } catch (__extErr) {
+          try { fs.rmSync(__tmpDir, { recursive: true, force: true }); } catch {}
+          throw __extErr;
+        }
+      }"
+`;

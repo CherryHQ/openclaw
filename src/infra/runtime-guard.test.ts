@@ -56,6 +56,14 @@ describe("runtime-guard", () => {
     expect(isSupportedNodeVersion("22.14.0")).toBe(true);
     expect(isSupportedNodeVersion("22.13.9")).toBe(false);
     expect(isSupportedNodeVersion(null)).toBe(false);
+
+    const bun: RuntimeDetails = {
+      kind: "bun",
+      version: "1.2.5",
+      execPath: "/usr/local/bin/bun",
+      pathEnv: "/usr/bin",
+    };
+    expect(runtimeSatisfies(bun)).toBe(true);
   });
 
   it("parses simple minimum node engine ranges", () => {

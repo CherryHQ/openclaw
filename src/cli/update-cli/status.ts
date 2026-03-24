@@ -85,11 +85,13 @@ export async function updateStatusCommand(opts: UpdateStatusOptions): Promise<vo
 
   const tableWidth = getTerminalTableWidth();
   const installLabel =
-    update.installKind === "git"
-      ? `git (${update.root ?? "unknown"})`
-      : update.installKind === "package"
-        ? update.packageManager
-        : "unknown";
+    update.installKind === "binary"
+      ? `binary (${update.root ?? process.execPath})`
+      : update.installKind === "git"
+        ? `git (${update.root ?? "unknown"})`
+        : update.installKind === "package"
+          ? update.packageManager
+          : "unknown";
 
   const rows = [
     { Item: "Install", Value: installLabel },
