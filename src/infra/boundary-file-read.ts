@@ -12,6 +12,14 @@ import {
   type SafeOpenSyncFailureReason,
 } from "./safe-open-sync.js";
 
+// Bun compiled binary virtual filesystem paths bypass boundary validation
+// because symlink/hardlink/TOCTOU checks don't apply to VFS.
+const BUNFS_PREFIX_UNIX = "/$bunfs/";
+const BUNFS_PREFIX_WIN = "B:\\~BUN\\";
+function isBunfsPath(p: string): boolean {
+  return p.startsWith(BUNFS_PREFIX_UNIX) || p.startsWith(BUNFS_PREFIX_WIN);
+}
+
 type BoundaryReadFs = Pick<
   typeof fs,
   | "closeSync"
@@ -67,6 +75,18 @@ export function canUseBoundaryFileOpen(ioFs: typeof fs): boolean {
 }
 
 export function openBoundaryFileSync(params: OpenBoundaryFileSyncParams): BoundaryFileOpenResult {
+  // Fast path for Bun compiled binary VFS paths — boundary validation
+  // (symlinks, hardlinks, TOCTOU identity) doesn't apply to virtual FS.
+  if (isBunfsPath(params.absolutePath)) {
+    const ioFs = params.ioFs ?? fs;
+    try {
+      const fd = ioFs.openSync(params.absolutePath, ioFs.constants.O_RDONLY);
+      const stat = ioFs.fstatSync(fd);
+      return { ok: true, path: params.absolutePath, fd, stat, rootRealPath: params.rootPath };
+    } catch {
+      return { ok: false, reason: "io" };
+    }
+  }
   const ioFs = params.ioFs ?? fs;
   const resolved = resolveBoundaryFilePathGeneric({
     absolutePath: params.absolutePath,

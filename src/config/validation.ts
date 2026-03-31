@@ -1,4 +1,5 @@
 import path from "node:path";
+import { isBunCompiledBinary } from "../daemon/runtime-binary.js";
 import { resolveAgentWorkspaceDir, resolveDefaultAgentId } from "../agents/agent-scope.js";
 import { CHANNEL_IDS, normalizeChatChannelId } from "../channels/registry.js";
 import { withBundledPluginAllowlistCompat } from "../plugins/bundled-compat.js";
@@ -668,8 +669,15 @@ function validateConfigObjectWithPluginsBase(
     }
   }
 
-  if (issues.length > 0) {
-    return { ok: false, issues, warnings };
+  // In Bun compiled binaries, VFS-embedded extensions that lack a manifest
+  // file produce spurious "plugin manifest not found: /$bunfs/..." issues.
+  // Filter them out so they don't block config validation.
+  const finalIssues = isBunCompiledBinary()
+    ? issues.filter((iss) => !(iss.message.includes("manifest not found") && iss.message.includes("$bunfs")))
+    : issues;
+
+  if (finalIssues.length > 0) {
+    return { ok: false, issues: finalIssues, warnings };
   }
 
   return { ok: true, config, warnings };

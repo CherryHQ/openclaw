@@ -292,52 +292,9 @@ export async function readPackageName(_root) { return ${JSON.stringify(ctx.pkgJs
         contents: patchManifestTs(readFileSync(args.path, "utf-8")),
         loader: "ts",
       }));
-      // Patch config/validation.ts: filter $bunfs manifest issues inside
-      // validateConfigObjectWithPluginsBase itself. Bun inlines callers ~32
-      // times, so patching callers in io.ts only covers 2. Patch the source.
-      build.onLoad({ filter: /config[/\\]validation\.ts$/ }, (args) => {
-        let src = readFileSync(args.path, "utf-8");
-        // Target the final return in validateConfigObjectWithPluginsBase (after plugin loop)
-        // which is `if (issues.length > 0) {\n    return { ok: false, issues, warnings };\n  }\n\n  return { ok: true, config, warnings };\n}`
-        src = src.replaceAll(
-          /if \(issues\.length > 0\) \{\s*return \{ ok: false, issues, warnings \};\s*\}\s*\n\s*return \{ ok: true, config, warnings \};\s*\}/g,
-          (match) => {
-            return [
-              `{`,
-              `  const __filtered = issues.filter((iss: any) => !(typeof iss.message === "string" && iss.message.includes("manifest not found") && iss.message.includes("$bunfs")));`,
-              `  if (__filtered.length > 0) return { ok: false as const, issues: __filtered, warnings };`,
-              `}`,
-              `return { ok: true as const, config, warnings };`,
-              `}`,
-            ].join("\n");
-          },
-        );
-        return { contents: src, loader: "ts" };
-      });
-      // Patch openBoundaryFileSync to handle $bunfs virtual paths.
-      // Boundary validation (symlinks, hardlinks, TOCTOU identity) doesn't
-      // apply to virtual filesystem paths and fails because VFS openSync
-      // creates temp files whose fstat doesn't match the VFS lstat.
-      build.onLoad({ filter: /infra[/\\]boundary-file-read\.ts$/ }, (args) => {
-        let src = readFileSync(args.path, "utf-8");
-        src = src.replace(
-          /export function openBoundaryFileSync\(params: OpenBoundaryFileSyncParams\): BoundaryFileOpenResult \{/,
-          [
-            `export function openBoundaryFileSync(params: OpenBoundaryFileSyncParams): BoundaryFileOpenResult {`,
-            `  if (typeof params.absolutePath === "string" && (params.absolutePath.includes("$bunfs") || params.absolutePath.includes("B:\\\\~BUN"))) {`,
-            `    const ioFs = params.ioFs ?? fs;`,
-            `    try {`,
-            `      const fd = ioFs.openSync(params.absolutePath, ioFs.constants.O_RDONLY);`,
-            `      const stat = ioFs.fstatSync(fd);`,
-            `      return { ok: true, path: params.absolutePath, fd, stat, rootRealPath: params.rootPath };`,
-            `    } catch {`,
-            `      return { ok: false, reason: "io" };`,
-            `    }`,
-            `  }`,
-          ].join("\n"),
-        );
-        return { contents: src, loader: "ts" };
-      });
+      // NOTE: openBoundaryFileSync VFS fast path and config validation $bunfs
+      // issue filtering are now handled in source code (boundary-file-read.ts
+      // and validation.ts) instead of build-time patches.
       // NOTE: playwright-core is bundled (not external) so Bun handles it.
       // Patch workspace-templates to prefer VFS-embedded templates directory
       build.onLoad({ filter: /agents[/\\]workspace-templates\.ts$/ }, (args) => {
