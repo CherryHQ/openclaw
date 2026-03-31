@@ -33,7 +33,14 @@ export function classifyDiscordGatewayEvent(params: {
   err: unknown;
   isDisallowedIntentsError: (err: unknown) => boolean;
 }): DiscordGatewayEvent {
-  const message = String(params.err);
+  const err = params.err;
+  const message =
+    err instanceof Error
+      ? err.message
+      : typeof err === "object" && err !== null && "message" in err
+        ? String((err as { message: unknown }).message) ||
+          ("error" in err ? String((err as { error: unknown }).error) : String(err))
+        : String(err);
   if (params.isDisallowedIntentsError(params.err)) {
     return {
       type: "disallowed-intents",
